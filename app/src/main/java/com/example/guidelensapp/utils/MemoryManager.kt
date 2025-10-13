@@ -1,4 +1,5 @@
 // app/src/main/java/com/example/guidelensapp/utils/MemoryManager.kt
+
 package com.example.guidelensapp.utils
 
 import android.app.ActivityManager
@@ -9,10 +10,8 @@ import java.lang.ref.WeakReference
 import java.util.concurrent.ConcurrentLinkedQueue
 
 class MemoryManager private constructor() {
-
     companion object {
         private const val TAG = "MemoryManager"
-
         @Volatile
         private var INSTANCE: MemoryManager? = null
 
@@ -97,20 +96,27 @@ class MemoryManager private constructor() {
         }
     }
 
+    /**
+     * Force garbage collection immediately (NEW METHOD)
+     */
+    fun forceGarbageCollection() {
+        Log.d(TAG, "Forcing garbage collection")
+        System.gc()
+        cleanupBitmapPool()
+        lastGcTime = System.currentTimeMillis()
+    }
+
     private fun cleanupBitmapPool() {
         val iterator = bitmapPool.iterator()
         var cleaned = 0
-
         while (iterator.hasNext()) {
             val ref = iterator.next()
             val bitmap = ref.get()
-
             if (bitmap == null || bitmap.isRecycled) {
                 iterator.remove()
                 cleaned++
             }
         }
-
         Log.d(TAG, "Cleaned up $cleaned dead bitmap references. Pool size: ${bitmapPool.size}")
     }
 
@@ -123,7 +129,6 @@ class MemoryManager private constructor() {
         activityManager.getMemoryInfo(memInfo)
 
         val runtime = Runtime.getRuntime()
-
         return MemoryInfo(
             totalSystemMemory = memInfo.totalMem,
             availableSystemMemory = memInfo.availMem,
@@ -132,21 +137,21 @@ class MemoryManager private constructor() {
             bitmapPoolSize = bitmapPool.size
         )
     }
-}
 
-data class MemoryInfo(
-    val totalSystemMemory: Long,
-    val availableSystemMemory: Long,
-    val usedAppMemory: Long,
-    val maxAppMemory: Long,
-    val bitmapPoolSize: Int
-) {
-    fun getUsagePercentage(): Float = (usedAppMemory.toFloat() / maxAppMemory.toFloat()) * 100f
+    data class MemoryInfo(
+        val totalSystemMemory: Long,
+        val availableSystemMemory: Long,
+        val usedAppMemory: Long,
+        val maxAppMemory: Long,
+        val bitmapPoolSize: Int
+    ) {
+        fun getUsagePercentage(): Float = (usedAppMemory.toFloat() / maxAppMemory.toFloat()) * 100f
 
-    override fun toString(): String {
-        return "Memory Usage: ${getUsagePercentage().toInt()}% " +
-                "(${usedAppMemory / 1024 / 1024}MB / ${maxAppMemory / 1024 / 1024}MB), " +
-                "System: ${availableSystemMemory / 1024 / 1024}MB available, " +
-                "Bitmap Pool: $bitmapPoolSize"
+        override fun toString(): String {
+            return "Memory Usage: ${getUsagePercentage().toInt()}% " +
+                    "(${usedAppMemory / 1024 / 1024}MB / ${maxAppMemory / 1024 / 1024}MB), " +
+                    "System: ${availableSystemMemory / 1024 / 1024}MB available, " +
+                    "Bitmap Pool: $bitmapPoolSize"
+        }
     }
 }

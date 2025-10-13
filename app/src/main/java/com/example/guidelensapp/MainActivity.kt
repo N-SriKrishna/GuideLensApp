@@ -1,4 +1,3 @@
-// File: app/src/main/java/com/example/guidelensapp/MainActivity.kt
 package com.example.guidelensapp
 
 import android.Manifest
@@ -6,16 +5,12 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -23,15 +18,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.navigation.compose.NavHost
-import androidx.navigation.compose.composable
-import androidx.navigation.compose.rememberNavController
 import com.example.guidelensapp.ui.composables.CameraView
-import com.example.guidelensapp.ui.composables.Overlays
-import com.example.guidelensapp.ui.composables.StartScreen
+import com.example.guidelensapp.ui.composables.ObjectSelectorView
+import com.example.guidelensapp.ui.composables.OverlayCanvas
 import com.example.guidelensapp.ui.theme.GuideLensAppTheme
-import com.example.guidelensapp.utils.ThreadManager
 import com.example.guidelensapp.viewmodel.NavigationViewModel
+import com.example.guidelensapp.utils.ThreadManager
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
@@ -41,19 +33,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         setContent {
             GuideLensAppTheme {
-                Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    val navController = rememberNavController()
-                    NavHost(navController = navController, startDestination = "start") {
-                        composable("start") {
-                            StartScreen(onStartClick = { navController.navigate("navigation") })
-                        }
-                        composable("navigation") {
-                            AppContent(viewModel)
-                        }
-                    }
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
+                ) {
+                    AppContent(viewModel)
                 }
             }
         }
@@ -66,23 +52,19 @@ class MainActivity : ComponentActivity() {
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
-
         when (level) {
             TRIM_MEMORY_UI_HIDDEN -> {
-                // App is in background
                 viewModel.setQuality(0.5f)
             }
             TRIM_MEMORY_RUNNING_MODERATE,
             TRIM_MEMORY_RUNNING_LOW,
             TRIM_MEMORY_RUNNING_CRITICAL -> {
-                // Memory pressure while running
                 viewModel.onLowMemory()
             }
         }
     }
 
     override fun onDestroy() {
-        // Ensure thread manager is shutdown
         ThreadManager.getInstance().shutdown()
         super.onDestroy()
     }
@@ -105,8 +87,65 @@ fun AppContent(viewModel: NavigationViewModel) {
         }
 
         Box(modifier = Modifier.fillMaxSize()) {
-            CameraView(onFrame = { viewModel.onFrame(it) })
-            Overlays(uiState = uiState)
+            // Camera feed (always visible)
+            if (uiState.isNavigating) {
+                CameraView(onFrame = { bitmap ->
+                    viewModel.processFrame(bitmap)
+                })
+
+                // Overlays when navigating
+                OverlayCanvas(uiState = uiState)
+            } else {
+                // Show placeholder when not navigating
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = Color.Black
+                ) {
+                    Text(
+                        text = "Ready to Navigate",
+                        color = Color.White,
+                        fontSize = 24.sp,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .wrapContentSize(Alignment.Center)
+                    )
+                }
+            }
+
+            // Object Selector Overlay (when not navigating)
+            if (uiState.showObjectSelector) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.5f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    ObjectSelectorView(
+                        currentTarget = uiState.targetObject,
+                        onTargetSelected = { obj -> viewModel.setTargetObject(obj) },
+                        onStartNavigation = { viewModel.startNavigation() },
+                        modifier = Modifier
+                            .fillMaxWidth(0.9f)
+                            .wrapContentHeight()
+                    )
+                }
+            }
+
+            // Floating button to change object during navigation
+            if (uiState.isNavigating) {
+                FloatingActionButton(
+                    onClick = { viewModel.stopNavigation() },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(16.dp),
+                    containerColor = MaterialTheme.colorScheme.secondary
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Settings,
+                        contentDescription = "Change Target"
+                    )
+                }
+            }
         }
     } else {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

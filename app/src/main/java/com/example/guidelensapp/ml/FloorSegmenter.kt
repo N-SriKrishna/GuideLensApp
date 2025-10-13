@@ -8,7 +8,6 @@ import android.util.Log
  * Wrapper class that uses ONNX-based floor segmentation
  */
 class FloorSegmenter(private val context: Context) {
-
     companion object {
         private const val TAG = "FloorSegmenter"
     }
@@ -44,16 +43,6 @@ class FloorSegmenter(private val context: Context) {
     }
 
     /**
-     * Get performance statistics
-     */
-    fun getPerformanceStats() = onnxSegmenter.getPerformanceStats()
-
-    /**
-     * Get health status
-     */
-    fun getHealth() = onnxSegmenter.getHealth()
-
-    /**
      * Check if ready
      */
     fun isReady() = onnxSegmenter.isReady()
@@ -68,6 +57,9 @@ class FloorSegmenter(private val context: Context) {
      */
     fun forceCleanup() = onnxSegmenter.forceCleanup()
 
+    /**
+     * Close and cleanup resources
+     */
     fun close() {
         try {
             onnxSegmenter.close()

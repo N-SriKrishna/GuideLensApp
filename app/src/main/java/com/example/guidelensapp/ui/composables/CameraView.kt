@@ -1,10 +1,8 @@
-// D:/WorkSpace/androidapps/GuideLensApp/app/src/main/java/com/example/guidelensapp/ui/composables/CameraView.kt
 package com.example.guidelensapp.ui.composables
 
 import android.graphics.Bitmap
 import android.graphics.ImageFormat
-import android.graphics.Rect
-import android.graphics.YuvImage
+import android.graphics.Matrix
 import android.util.Log
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
@@ -19,88 +17,97 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.viewinterop.AndroidView
-import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
 
 @Composable
 fun CameraView(onFrame: (Bitmap) -> Unit) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
 
     AndroidView(
         modifier = Modifier.fillMaxSize(),
         factory = { ctx ->
-            val previewView = PreviewView(ctx).apply {
-                scaleType = PreviewView.ScaleType.FILL_CENTER
-            }
-            val cameraProvider = cameraProviderFuture.get()
+            val previewView = PreviewView(ctx)
+            val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
 
-            val preview = Preview.Builder().build().also {
-                it.setSurfaceProvider(previewView.surfaceProvider)
-            }
+            cameraProviderFuture.addListener({
+                val cameraProvider = cameraProviderFuture.get()
 
-            val imageAnalysis = ImageAnalysis.Builder()
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
-                .build()
-                .also {
-                    it.setAnalyzer(cameraExecutor) { imageProxy ->
-                        imageProxy.use { proxy ->
-                            val bitmap = proxy.toBitmap()
-                            if (bitmap != null) {
-                                onFrame(bitmap)
-                            }
+                val preview = Preview.Builder()
+                    .build()
+                    .also {
+                        it.setSurfaceProvider(previewView.surfaceProvider)
+                    }
+
+                // FIXED: Use RGBA format like the working app
+                val imageAnalyzer = ImageAnalysis.Builder()
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)  // KEY CHANGE
+                    .build()
+                    .also {
+                        it.setAnalyzer(cameraExecutor) { imageProxy ->
+                            processImageProxy(imageProxy, onFrame)
                         }
                     }
+
+                val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+
+                try {
+                    cameraProvider.unbindAll()
+                    cameraProvider.bindToLifecycle(
+                        lifecycleOwner,
+                        cameraSelector,
+                        preview,
+                        imageAnalyzer
+                    )
+                } catch (e: Exception) {
+                    Log.e("CameraView", "Camera binding failed", e)
                 }
+            }, context.mainExecutor)
 
-            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-
-            try {
-                cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(
-                    lifecycleOwner,
-                    cameraSelector,
-                    preview,
-                    imageAnalysis
-                )
-            } catch (exc: Exception) {
-                exc.printStackTrace()
-            }
             previewView
-        },
-        onRelease = {
-            cameraExecutor.shutdown()
         }
     )
 }
 
-// Helper to convert YUV ImageProxy to a proper ARGB Bitmap
-private fun ImageProxy.toBitmap(): Bitmap? {
-    Log.d("CameraView", "Image format: $format, size: ${width}x${height}")
-    if (format != ImageFormat.YUV_420_888) {
-        Log.e("CameraView", "Unsupported image format: $format")
-        return null // Ensure we have a YUV image
+// IMPROVED: Direct RGBA to Bitmap conversion
+private fun processImageProxy(imageProxy: ImageProxy, onFrame: (Bitmap) -> Unit) {
+    try {
+        val bitmap = imageProxyToBitmap(imageProxy)
+        val rotatedBitmap = rotateBitmap(bitmap, imageProxy.imageInfo.rotationDegrees.toFloat())
+        onFrame(rotatedBitmap)
+    } catch (e: Exception) {
+        Log.e("CameraView", "Error processing frame", e)
+    } finally {
+        imageProxy.close()
     }
+}
 
-    val yBuffer = planes[0].buffer
-    val uBuffer = planes[1].buffer
-    val vBuffer = planes[2].buffer
+private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap {
+    val plane = imageProxy.planes[0]
+    val buffer = plane.buffer
+    val pixelStride = plane.pixelStride
+    val rowStride = plane.rowStride
+    val rowPadding = rowStride - pixelStride * imageProxy.width
 
-    val ySize = yBuffer.remaining()
-    val uSize = uBuffer.remaining()
-    val vSize = vBuffer.remaining()
+    val bitmap = Bitmap.createBitmap(
+        imageProxy.width + rowPadding / pixelStride,
+        imageProxy.height,
+        Bitmap.Config.ARGB_8888
+    )
 
-    val nv21 = ByteArray(ySize + uSize + vSize)
-    yBuffer.get(nv21, 0, ySize)
-    vBuffer.get(nv21, ySize, vSize)
-    uBuffer.get(nv21, ySize + vSize, uSize)
+    bitmap.copyPixelsFromBuffer(buffer)
 
-    val yuvImage = YuvImage(nv21, ImageFormat.NV21, this.width, this.height, null)
-    val out = ByteArrayOutputStream()
-    yuvImage.compressToJpeg(Rect(0, 0, this.width, this.height), 100, out)
-    val imageBytes = out.toByteArray()
-    return android.graphics.BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+    return if (rowPadding > 0) {
+        Bitmap.createBitmap(bitmap, 0, 0, imageProxy.width, imageProxy.height)
+    } else {
+        bitmap
+    }
+}
+
+private fun rotateBitmap(bitmap: Bitmap, degrees: Float): Bitmap {
+    if (degrees == 0f) return bitmap
+    val matrix = Matrix().apply { postRotate(degrees) }
+    return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
 }

@@ -23,19 +23,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import java.util.concurrent.atomic.AtomicBoolean
-
-data class NavigationUiState(
-    val cameraBitmap: ImageBitmap? = null,
-    val floorMaskBitmap: ImageBitmap? = null,
-    val detections: List<DetectionResult> = emptyList(),
-    val navigationPath: List<PointF>? = null,
-    val command: String = "Initializing...",
-    val systemState: String = "INIT",
-    val performanceInfo: String = ""
-)
+import java.util.concurrent.atomic.AtomicLong
 
 class NavigationViewModel : ViewModel() {
-
     private val _uiState = MutableStateFlow(NavigationUiState())
     val uiState = _uiState.asStateFlow()
 
@@ -53,6 +43,7 @@ class NavigationViewModel : ViewModel() {
 
     // Navigation timing
     private var lastInstructionTime = 0L
+    private var targetPosition: PointF? = null
 
     // Device detection
     private val isEmulator = android.os.Build.FINGERPRINT.contains("generic") ||
@@ -80,6 +71,10 @@ class NavigationViewModel : ViewModel() {
     private var consecutiveErrors = 0
     private val MAX_CONSECUTIVE_ERRORS = 5
 
+    // Target object tracking
+    private val _targetObject = MutableStateFlow("chair")
+    val targetObject = _targetObject.asStateFlow()
+
     companion object {
         private const val TAG = "NavigationViewModel"
         private const val SEGMENTATION_TIMEOUT_MS = 8000L
@@ -95,7 +90,7 @@ class NavigationViewModel : ViewModel() {
         viewModelScope.launch(threadManager.ioDispatcher) {
             try {
                 Log.d(TAG, "Initializing models... (isEmulator=$isEmulator)")
-                _uiState.update { it.copy(command = "Loading models...", systemState = "LOADING") }
+                _uiState.update { it.copy(navigationCommand = "Loading models...") }
 
                 // Initialize models
                 objectDetector = ObjectDetector(context)
@@ -103,28 +98,27 @@ class NavigationViewModel : ViewModel() {
                 pathPlanner = PathPlanner()
 
                 Log.d(TAG, "Models initialized successfully")
-                _uiState.update { it.copy(command = "Models loaded - Warming up...", systemState = "WARMING_UP") }
+                _uiState.update { it.copy(navigationCommand = "Models loaded - Warming up...") }
 
                 // Wait for floor segmenter to warm up
                 var waitTime = 0
-                while (!floorSegmenter?.isReady()!! && waitTime < 5000) {
+                while (floorSegmenter?.isReady() == false && waitTime < 5000) {
                     delay(100)
                     waitTime += 100
                 }
 
                 modelsWarmedUp = true
-
-                _uiState.update { it.copy(command = "Ready", systemState = "SEARCHING") }
+                _uiState.update { it.copy(navigationCommand = "Ready") }
                 Log.d(TAG, "Models ready for inference")
 
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to initialize models", e)
-                _uiState.update { it.copy(command = "Initialization failed: ${e.message}", systemState = "ERROR") }
+                _uiState.update { it.copy(navigationCommand = "Initialization failed: ${e.message}") }
             }
         }
     }
 
-    fun onFrame(bitmap: Bitmap) {
+    fun processFrame(bitmap: Bitmap) {
         // Don't process until models are ready
         if (!modelsWarmedUp) {
             return
@@ -172,6 +166,7 @@ class NavigationViewModel : ViewModel() {
                 val detectionResults = withTimeoutOrNull(DETECTION_TIMEOUT_MS) {
                     detector.detect(rgbBitmap)
                 } ?: emptyList()
+
                 val detectionTime = System.currentTimeMillis() - detectionStartTime
 
                 if (!isActive) {
@@ -185,7 +180,6 @@ class NavigationViewModel : ViewModel() {
 
                 val floorMask = if (shouldSegment) {
                     val segmentationStartTime = System.currentTimeMillis()
-
                     val mask = withTimeoutOrNull(SEGMENTATION_TIMEOUT_MS) {
                         segmenter.segmentFloor(rgbBitmap)
                     }
@@ -217,14 +211,8 @@ class NavigationViewModel : ViewModel() {
 
                 if (!isActive) return@launch
 
-                // Find target and plan path
-                val target = detectionResults.find {
-                    it.label.equals(Config.TARGET_OBJECT_LABEL, ignoreCase = true)
-                }
-
-                val targetPosition = target?.let {
-                    PointF(it.boundingBox.centerX(), it.boundingBox.centerY())
-                }
+                // Find target using dynamic object
+                targetPosition = findTarget(detectionResults)
 
                 val navOutput = if (floorMask != null) {
                     planner.getNavigationCommand(
@@ -239,16 +227,6 @@ class NavigationViewModel : ViewModel() {
 
                 val totalTime = System.currentTimeMillis() - frameStartTime
 
-                // Get performance info
-                val performanceInfo = buildPerformanceInfo(
-                    frameTime = totalTime,
-                    detectionTime = detectionTime,
-                    segmentationUsedCache = !shouldSegment
-                )
-
-                // Check system health
-                val systemHealth = checkSystemHealth()
-
                 // Update UI state
                 _uiState.update { currentState ->
                     val instructionTime = System.currentTimeMillis()
@@ -256,45 +234,32 @@ class NavigationViewModel : ViewModel() {
                         lastInstructionTime = instructionTime
                         when {
                             consecutiveErrors >= MAX_CONSECUTIVE_ERRORS -> "System experiencing issues..."
-                            !systemHealth -> "Performance degraded - reducing quality"
                             else -> navOutput.command
                         }
                     } else {
-                        currentState.command
-                    }
-
-                    val systemState = when {
-                        consecutiveErrors >= MAX_CONSECUTIVE_ERRORS -> "ERROR"
-                        !systemHealth -> "DEGRADED"
-                        target != null -> "GUIDING"
-                        else -> "SEARCHING"
+                        currentState.navigationCommand
                     }
 
                     currentState.copy(
-                        cameraBitmap = bitmap.asImageBitmap(),
-                        detections = detectionResults,
-                        floorMaskBitmap = floorMask?.asImageBitmap(),
-                        navigationPath = navOutput.path,
-                        command = newCommand,
-                        systemState = systemState,
-                        performanceInfo = performanceInfo
+                        cameraImage = bitmap.asImageBitmap(),
+                        detectedObjects = detectionResults,
+                        floorMaskOverlay = floorMask?.asImageBitmap(),
+                        path = navOutput.path,
+                        navigationCommand = newCommand,
+                        targetPosition = targetPosition
                     )
                 }
 
                 // Log performance periodically
                 if (frameCount % 30 == 0L) {
-                    logDetailedPerformance()
+                    Log.d(TAG, "Frame processing took ${totalTime}ms (detection: ${detectionTime}ms)")
                 }
 
             } catch (e: Exception) {
                 Log.e(TAG, "Error in frame processing", e)
                 consecutiveErrors++
-
                 _uiState.update { currentState ->
-                    currentState.copy(
-                        command = "Processing error",
-                        systemState = "ERROR"
-                    )
+                    currentState.copy(navigationCommand = "Processing error")
                 }
             } finally {
                 isProcessing.set(false)
@@ -302,131 +267,44 @@ class NavigationViewModel : ViewModel() {
         }
     }
 
-    /**
-     * Build performance info string for UI
-     */
-    private fun buildPerformanceInfo(
-        frameTime: Long,
-        detectionTime: Long,
-        segmentationUsedCache: Boolean
-    ): String {
-        val fps = if (frameTime > 0) 1000f / frameTime else 0f
-        val segmenterStats = floorSegmenter?.getPerformanceStats()
-        val health = floorSegmenter?.getHealth()
+    private fun findTarget(detections: List<DetectionResult>): PointF? {
+        val currentTarget = _targetObject.value
+        val targetDetection = detections
+            .filter { it.label.equals(currentTarget, ignoreCase = true) }
+            .maxByOrNull { it.confidence }
 
-        return buildString {
-            append("FPS: ${String.format("%.1f", fps)}")
-            append(" | Detection: ${detectionTime}ms")
-
-            segmenterStats?.let { stats ->
-                if (stats.totalFrames > 0) {
-                    append("\nSegmentation: ${stats.avgInferenceTime}ms")
-                    append(" (Q: ${(stats.currentQuality * 100).toInt()}%)")
-                }
-            }
-
-            health?.let { h ->
-                if (!h.isHealthy) {
-                    append("\n⚠️ Health: ${h.errorRate.toInt()}% errors")
-                }
-            }
-
-            if (segmentationUsedCache) {
-                append(" [cached]")
-            }
-
-            // Memory info - use stored context
-            applicationContext?.let { ctx ->
-                val memInfo = memoryManager.getMemoryInfo(ctx)
-                if (memInfo.getUsagePercentage() > 80) {
-                    append("\n⚠️ Memory: ${memInfo.getUsagePercentage().toInt()}%")
-                }
-            }
+        return targetDetection?.let {
+            PointF(
+                it.boundingBox.centerX(),
+                it.boundingBox.centerY()
+            )
         }
     }
 
-    /**
-     * Check system health and adjust quality if needed
-     */
-    private fun checkSystemHealth(): Boolean {
-        val segmenterHealth = floorSegmenter?.getHealth() ?: return true
+    fun setTargetObject(objectLabel: String) {
+        _targetObject.value = objectLabel.lowercase().trim()
+        _uiState.update { it.copy(targetObject = objectLabel.lowercase().trim()) }
+        Log.d(TAG, "Target object changed to: ${_targetObject.value}")
 
-        // Adjust quality based on health
-        if (!segmenterHealth.isHealthy) {
-            when {
-                segmenterHealth.avgResponseTime > 500 && segmenterHealth.quality > 0.5f -> {
-                    Log.w(TAG, "Performance degraded, reducing quality")
-                    floorSegmenter?.setQuality(0.5f)
-                    return false
-                }
-                segmenterHealth.errorRate > 20f -> {
-                    Log.w(TAG, "High error rate, forcing cleanup")
-                    floorSegmenter?.forceCleanup()
-                    return false
-                }
-                segmenterHealth.memoryPressure > 85f -> {
-                    Log.w(TAG, "High memory pressure, forcing cleanup")
-                    applicationContext?.let { ctx ->
-                        memoryManager.performGcIfNeeded(ctx)
-                    }
-                    floorSegmenter?.forceCleanup()
-                    return false
-                }
-            }
-        } else {
-            // Health is good, try to restore quality
-            if (segmenterHealth.quality < 1.0f && segmenterHealth.avgResponseTime < 200) {
-                floorSegmenter?.setQuality(1.0f)
-            }
-        }
-
-        return segmenterHealth.isHealthy
+        // Reset target position when changing objects
+        targetPosition = null
+        _uiState.update { it.copy(targetPosition = null, path = null) }
     }
 
-    /**
-     * Log detailed performance metrics
-     */
-    private fun logDetailedPerformance() {
-        Log.i(TAG, "=== PERFORMANCE REPORT (Frame $frameCount) ===")
-
-        // Object detector stats
-        Log.i(TAG, "Object Detection: Active")
-
-        // Floor segmenter stats
-        floorSegmenter?.let { segmenter ->
-            val stats = segmenter.getPerformanceStats()
-            val health = segmenter.getHealth()
-
-            Log.i(TAG, "Floor Segmentation:")
-            Log.i(TAG, "  - Frames: ${stats.totalFrames}")
-            Log.i(TAG, "  - Avg Total: ${stats.avgTotalTime}ms")
-            Log.i(TAG, "  - Avg FPS: ${String.format("%.1f", stats.avgFPS)}")
-            Log.i(TAG, "  - Quality: ${(stats.currentQuality * 100).toInt()}%")
-            Log.i(TAG, "  - Health: ${if (health.isHealthy) "✅ GOOD" else "⚠️ DEGRADED"}")
-            Log.i(TAG, "  - Errors: ${String.format("%.1f", health.errorRate)}%")
-        }
-
-        // Memory stats - use stored context
-        applicationContext?.let { ctx ->
-            val memInfo = memoryManager.getMemoryInfo(ctx)
-            Log.i(TAG, "Memory:")
-            Log.i(TAG, "  - App Usage: ${memInfo.getUsagePercentage().toInt()}%")
-            Log.i(TAG, "  - Bitmap Pool: ${memInfo.bitmapPoolSize}")
-        }
-
-        // Thread stats
-        val threadStats = threadManager.getThreadPoolStats()
-        Log.i(TAG, "Threads: $threadStats")
-
-        Log.i(TAG, "=======================================")
+    fun toggleObjectSelector() {
+        _uiState.update { it.copy(showObjectSelector = !it.showObjectSelector) }
     }
 
-    /**
-     * Handle low memory situations
-     */
+    fun startNavigation() {
+        _uiState.update { it.copy(isNavigating = true, showObjectSelector = false) }
+    }
+
+    fun stopNavigation() {
+        _uiState.update { it.copy(isNavigating = false, showObjectSelector = true) }
+    }
+
     fun onLowMemory() {
         Log.w(TAG, "Low memory warning received")
-
         // Force cleanup
         floorSegmenter?.forceCleanup()
 
@@ -436,35 +314,16 @@ class NavigationViewModel : ViewModel() {
             cachedFloorMask = null
         }
 
-        // Reduce quality
-        floorSegmenter?.setQuality(0.5f)
-
         // Force GC
         System.gc()
 
-        _uiState.update { it.copy(
-            command = "Reducing quality due to memory pressure",
-            systemState = "DEGRADED"
-        ) }
+        _uiState.update { it.copy(navigationCommand = "Reducing quality due to memory pressure") }
     }
 
-    /**
-     * Manually adjust quality
-     */
     fun setQuality(quality: Float) {
         floorSegmenter?.setQuality(quality)
         Log.d(TAG, "Quality manually set to ${(quality * 100).toInt()}%")
     }
-
-    /**
-     * Get current performance statistics
-     */
-    fun getPerformanceStats() = floorSegmenter?.getPerformanceStats()
-
-    /**
-     * Get system health
-     */
-    fun getSystemHealth() = floorSegmenter?.getHealth()
 
     override fun onCleared() {
         super.onCleared()
@@ -494,6 +353,7 @@ class NavigationViewModel : ViewModel() {
             applicationContext = null
 
             Log.d(TAG, "NavigationViewModel cleaned up successfully")
+
         } catch (e: Exception) {
             Log.e(TAG, "Error during cleanup", e)
         }
