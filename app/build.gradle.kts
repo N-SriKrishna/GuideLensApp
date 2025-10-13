@@ -94,5 +94,10 @@ dependencies {
     // Navigation Compose
     implementation(libs.androidx.navigation.compose)
 
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.16.3")
+    // Coroutines
+    implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.kotlinx.coroutines.core)
+
+    // ONNX Runtime
+    implementation(libs.onnx.runtime.android)
 }

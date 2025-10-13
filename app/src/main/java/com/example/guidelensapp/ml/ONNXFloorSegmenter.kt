@@ -7,349 +7,418 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.util.Log
 import ai.onnxruntime.*
+import com.example.guidelensapp.utils.MemoryManager
+import com.example.guidelensapp.utils.ThreadManager
+import kotlinx.coroutines.*
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlinx.coroutines.*
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.exp
 
 class ONNXFloorSegmenter(
     private val context: Context,
     private val useQuantized: Boolean = true
 ) {
     private val TAG = "ONNXFloorSegmenter"
-
-    private val MODEL_NAME = if (useQuantized)
-        "floor_segmentation_int8.onnx"
-    else
-        "floor_segmentation.onnx"
+    private val MODEL_NAME =
+        if (useQuantized) "floor_segmentation_int8.onnx" else "floor_segmentation.onnx"
 
     private var session: OrtSession? = null
-    private var environment: OrtEnvironment? = null
+    private var env: OrtEnvironment? = null
+
     private val isInitialized = AtomicBoolean(false)
     private val isClosed = AtomicBoolean(false)
-    private val isFirstInference = AtomicBoolean(true) // Track first inference
+    private val isFirstInference = AtomicBoolean(true)
 
-    // PPLiteSeg model input dimensions
+    // Model input dims
     private val inputWidth = 256
     private val inputHeight = 256
     private val inputChannels = 3
 
-    // Performance tracking
-    private var frameCount = 0
-    private var totalInferenceTime = 0L
+    // Thread & memory managers
+    private val threadMgr = ThreadManager.getInstance()
+    private val memMgr = MemoryManager.getInstance()
 
-    // Lock for thread safety
+    // Pre-allocated buffers
+    @Volatile private var inputArray: FloatArray? = null
+    @Volatile private var pixelArray: IntArray? = null
+
+    // Buffer sizes
+    private var inputSize = inputChannels * inputHeight * inputWidth
+
+    // Performance tracking
+    private val frameCount = AtomicLong(0)
+    private val totalTimeAcc = AtomicLong(0L)
+    private val totalPrepAcc = AtomicLong(0L)
+    private val totalInferAcc = AtomicLong(0L)
+    private val totalPostAcc = AtomicLong(0L)
+
+    // Concurrency limit
+    private val inFlight = AtomicInteger(0)
+    private val MAX_INFLIGHT = 2
+
+    // Quality control
+    @Volatile private var quality = 1.0f
+
+    // Health monitoring
+    private val recentFrames = mutableListOf<Long>()
+    private val MAX_HIST = 10
+
+    private var warmupJob: Job? = null
     private val lock = Any()
 
-    // Warm-up job
-    private var warmupJob: Job? = null
-
     init {
-        try {
-            loadModel()
-            // Start warm-up in background
-            startWarmup()
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to initialize", e)
-            close()
-        }
-    }
-
-    private fun loadModel() {
-        try {
-            Log.d(TAG, "Loading model: $MODEL_NAME")
-
-            // Initialize environment
-            environment = OrtEnvironment.getEnvironment()
-
-            // Try to open the model
-            val modelBytes = try {
-                context.assets.open(MODEL_NAME).use {
-                    it.readBytes()
-                }
-            } catch (e: java.io.FileNotFoundException) {
-                Log.e(TAG, "❌ Model file not found: $MODEL_NAME")
-                throw RuntimeException("Model file '$MODEL_NAME' not found in assets folder")
-            }
-
-            Log.d(TAG, "✅ Model loaded: ${modelBytes.size / (1024 * 1024)} MB")
-
-            val sessionOptions = OrtSession.SessionOptions().apply {
-                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-                setIntraOpNumThreads(2) // Reduced from 4 to 2 for better stability
-                setExecutionMode(OrtSession.SessionOptions.ExecutionMode.SEQUENTIAL)
-            }
-
-            session = environment?.createSession(modelBytes, sessionOptions)
-            isInitialized.set(true)
-
-            Log.i(TAG, "✅ ONNX Floor Segmentation Model initialized successfully")
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to load ONNX model", e)
-            isInitialized.set(false)
-            throw e
-        }
-    }
-
-    /**
-     * Warm up the model with a dummy input to avoid first-time inference delay
-     */
-    private fun startWarmup() {
-        warmupJob = CoroutineScope(Dispatchers.Default).launch {
+        threadMgr.backgroundScope.launch {
             try {
-                delay(500) // Wait a bit for UI to settle
-                Log.d(TAG, "Starting model warm-up...")
-
-                // Create a dummy bitmap for warm-up
-                val dummyBitmap = Bitmap.createBitmap(inputWidth, inputHeight, Bitmap.Config.ARGB_8888)
-                dummyBitmap.eraseColor(Color.GRAY)
-
-                // Run a dummy inference to warm up the model
-                val warmupStart = System.currentTimeMillis()
-                val result = segmentFloorInternal(dummyBitmap, isWarmup = true)
-                val warmupTime = System.currentTimeMillis() - warmupStart
-
-                if (result != null) {
-                    Log.i(TAG, "✅ Model warm-up completed in ${warmupTime}ms")
-                    isFirstInference.set(false) // Mark warm-up as done
-                } else {
-                    Log.w(TAG, "⚠️ Model warm-up returned null")
-                }
-
-                dummyBitmap.recycle()
-
+                loadModel()
+                allocateBuffers()
+                warmUp()
             } catch (e: Exception) {
-                Log.e(TAG, "Model warm-up failed", e)
+                Log.e(TAG, "Initialization failed", e)
+                close()
             }
         }
     }
 
-    /**
-     * Main floor segmentation function - replaces EdgeSAM segmentFloor
-     */
-    fun segmentFloor(bitmap: Bitmap): Bitmap? {
-        return segmentFloorInternal(bitmap, isWarmup = false)
+    private suspend fun loadModel() = withContext(threadMgr.ioDispatcher) {
+        env = OrtEnvironment.getEnvironment()
+        val modelBytes = context.assets.open(MODEL_NAME).use { it.readBytes() }
+
+        val opts = OrtSession.SessionOptions().apply {
+            setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+            // pick a thread count based on cores
+            val cores = Runtime.getRuntime().availableProcessors()
+            setIntraOpNumThreads(when {
+                cores >= 8 -> 4
+                cores >= 4 -> 2
+                else -> 1
+            })
+            setExecutionMode(OrtSession.SessionOptions.ExecutionMode.SEQUENTIAL)
+        }
+
+        session = env!!.createSession(modelBytes, opts)
+        isInitialized.set(true)
+        Log.i(TAG, "Model loaded: $MODEL_NAME")
     }
 
-    private fun segmentFloorInternal(bitmap: Bitmap, isWarmup: Boolean = false): Bitmap? {
-        if (bitmap == null || isClosed.get() || !isInitialized.get()) {
+    private suspend fun allocateBuffers() = withContext(threadMgr.ioDispatcher) {
+        inputArray = FloatArray(inputSize)
+        pixelArray = IntArray(inputWidth * inputHeight)
+    }
+
+    private fun warmUp() {
+        warmupJob = threadMgr.backgroundScope.launch {
+            delay(500)
+            val bmp = memMgr.getBitmap(inputWidth, inputHeight, Bitmap.Config.ARGB_8888)
+            bmp.eraseColor(Color.GRAY)
+            segment(bmp, true)
+            memMgr.recycleBitmap(bmp)
+            isFirstInference.set(false)
+            Log.i(TAG, "Warm-up done")
+        }
+    }
+
+    /**
+     * Public API: returns a mask bitmap or null on error
+     */
+    fun segmentFloor(bitmap: Bitmap?): Bitmap? {
+        if (bitmap == null || isClosed.get() || !isInitialized.get()) return null
+        if (inFlight.incrementAndGet() > MAX_INFLIGHT) {
+            inFlight.decrementAndGet()
             return null
         }
-
-        val currentSession = session ?: return null
-        val currentEnvironment = environment ?: return null
-
-        // If this is the first real inference and warmup hasn't completed, wait a bit
-        if (!isWarmup && isFirstInference.get()) {
-            Log.d(TAG, "Waiting for warm-up to complete...")
-            // Give warmup a chance to complete
-            Thread.sleep(100)
+        return try {
+            runBlocking {
+                threadMgr.executeMLInference {
+                    segment(bitmap, false)
+                }.await()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "segmentFloor() error", e)
+            null
+        } finally {
+            inFlight.decrementAndGet()
         }
+    }
 
-        synchronized(lock) {
-            val startTotal = System.currentTimeMillis()
-            var tensor: OnnxTensor? = null
-            var outputs: OrtSession.Result? = null
+    private suspend fun segment(bitmap: Bitmap, isWarmup: Boolean): Bitmap? =
+        withContext(threadMgr.mlDispatcher) {
+            synchronized(lock) {
+                val t0 = System.currentTimeMillis()
 
-            try {
-                // Preprocess - make it faster for real inference
-                val resizedBitmap = if (bitmap.width == inputWidth && bitmap.height == inputHeight) {
-                    bitmap // Already correct size
-                } else {
-                    Bitmap.createScaledBitmap(bitmap, inputWidth, inputHeight, true)
+                // Step 1: Resize for quality
+                val w = (inputWidth * quality).toInt().coerceAtLeast(128)
+                val h = (inputHeight * quality).toInt().coerceAtLeast(128)
+                val resized = if (bitmap.width == w && bitmap.height == h) bitmap
+                else {
+                    val b = memMgr.getBitmap(w, h, Bitmap.Config.ARGB_8888)
+                    Canvas(b).drawBitmap(bitmap, null, android.graphics.Rect(0,0,w,h), Paint())
+                    b
                 }
 
-                val inputTensor = preprocessBitmap(resizedBitmap)
-
-                // Check if closed during preprocessing
-                if (isClosed.get()) return null
-
-                // Create input tensor
-                val inputName = currentSession.inputNames?.iterator()?.next() ?: return null
-                val shape = longArrayOf(1, inputChannels.toLong(), inputHeight.toLong(), inputWidth.toLong())
-                tensor = OnnxTensor.createTensor(currentEnvironment, FloatBuffer.wrap(inputTensor), shape)
-
-                // Run inference
-                val startInfer = System.currentTimeMillis()
-                outputs = currentSession.run(mapOf(inputName to tensor))
-                val inferTime = System.currentTimeMillis() - startInfer
-
-                // Check if closed during inference
-                if (isClosed.get()) return null
-
-                // Post-process
-                val output = outputs?.get(0) as? OnnxTensor ?: return null
-                val outputArray = output.floatBuffer.array()
-                val maskShape = output.info.shape
-                val maskHeight = maskShape[2].toInt()
-                val maskWidth = maskShape[3].toInt()
-
-                // Apply sigmoid and create bitmap only if not warmup
-                val maskBitmap = if (isWarmup) {
-                    // For warmup, create a simple dummy bitmap
-                    createDummyMask(bitmap.width, bitmap.height)
-                } else {
-                    // Apply sigmoid
-                    val processedMask = FloatArray(outputArray.size)
-                    for (i in outputArray.indices) {
-                        processedMask[i] = sigmoid(outputArray[i])
-                    }
-
-                    // Convert to bitmap
-                    createFloorMaskBitmap(
-                        processedMask,
-                        maskWidth,
-                        maskHeight,
-                        bitmap.width,
-                        bitmap.height
-                    )
+                // Pre-process CHW
+                val pix = pixelArray!!
+                resized.getPixels(pix, 0, w, 0, 0, w, h)
+                val arr = inputArray!!
+                val norm = 1f/255f
+                for (i in pix.indices) {
+                    val p = pix[i]
+                    arr[i] = ((p shr 16) and 0xFF)*norm
+                    arr[i+pix.size] = ((p shr 8) and 0xFF)*norm
+                    arr[i+2*pix.size] = (p and 0xFF)*norm
                 }
+                if (resized !== bitmap) memMgr.recycleBitmap(resized)
+                val t1 = System.currentTimeMillis()
 
-                val totalTime = System.currentTimeMillis() - startTotal
+                // Step 2: Inference
+                val inputName = session!!.inputNames.iterator().next()
+                val shape = longArrayOf(1, inputChannels.toLong(), h.toLong(), w.toLong())
+                val tensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(arr), shape)
+                val out = session!!.run(mapOf(inputName to tensor))
+                val t2 = System.currentTimeMillis()
 
+                // Step 3: Post-process
+                @Suppress("UNCHECKED_CAST")
+                val oto = out[0] as OnnxTensor
+                val logits = oto.floatBuffer.array()
+                val maskW = (oto.info as TensorInfo).shape[3].toInt()
+                val maskH = (oto.info as TensorInfo).shape[2].toInt()
+                val pixels = IntArray(maskW*maskH)
+                for (i in logits.indices) {
+                    val prob = 1f/(1f+exp(-logits[i]))
+                    pixels[i] = if (prob>0.5f) Color.argb((prob*128).toInt(),0,255,0) else Color.TRANSPARENT
+                }
+                val maskBmp = memMgr.getBitmap(maskW, maskH, Bitmap.Config.ARGB_8888)
+                maskBmp.setPixels(pixels,0,maskW,0,0,maskW,maskH)
+                val finalBmp = if (maskW!=bitmap.width||maskH!=bitmap.height) {
+                    val fb = memMgr.getBitmap(bitmap.width,bitmap.height,Bitmap.Config.ARGB_8888)
+                    Canvas(fb).drawBitmap(maskBmp,null,
+                        android.graphics.Rect(0,0,bitmap.width,bitmap.height),Paint())
+                    memMgr.recycleBitmap(maskBmp)
+                    fb
+                } else maskBmp
+                val t3 = System.currentTimeMillis()
+
+                // Logging & stats
+                val prep = t1-t0; val infer = t2-t1; val post = t3-t2; val tot = t3-t0
                 if (!isWarmup) {
-                    // Performance logging only for real inference
-                    frameCount++
-                    totalInferenceTime += inferTime
-
-                    Log.d(TAG, "⏱️ Floor Segmentation: Total=${totalTime}ms (Infer=${inferTime}ms)")
-
-                    if (frameCount % 30 == 0) {
-                        val avgInference = totalInferenceTime / frameCount
-                        Log.i(TAG, "📊 Avg inference: ${avgInference}ms | Frame count: $frameCount")
-                    }
-
-                    // Mark first real inference as complete
-                    isFirstInference.set(false)
+                    frameCount.incrementAndGet()
+                    totalPrepAcc.addAndGet(prep)
+                    totalInferAcc.addAndGet(infer)
+                    totalPostAcc.addAndGet(post)
+                    totalTimeAcc.addAndGet(tot)
+                    updatePerformanceTracking(tot)
                 }
 
-                return maskBitmap
+                // Clean up
+                tensor.close()
+                out.close()
 
-            } catch (e: Exception) {
-                if (!isClosed.get() && !isWarmup) {
-                    Log.e(TAG, "Floor segmentation error", e)
-                }
-                return null
-            } finally {
-                // Clean up resources
-                try {
-                    tensor?.close()
-                    outputs?.close()
-                } catch (e: Exception) {
-                    // Ignore cleanup errors
-                }
-            }
-        }
-    }
-
-    private fun preprocessBitmap(bitmap: Bitmap): FloatArray {
-        val pixels = IntArray(bitmap.width * bitmap.height)
-        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
-
-        val floatArray = FloatArray(inputChannels * inputHeight * inputWidth)
-
-        for (i in pixels.indices) {
-            val pixel = pixels[i]
-
-            // Extract RGB and normalize to [0, 1]
-            val r = (pixel shr 16 and 0xFF) / 255.0f
-            val g = (pixel shr 8 and 0xFF) / 255.0f
-            val b = (pixel and 0xFF) / 255.0f
-
-            // CHW format
-            floatArray[i] = r
-            floatArray[pixels.size + i] = g
-            floatArray[2 * pixels.size + i] = b
-        }
-
-        return floatArray
-    }
-
-    private fun sigmoid(x: Float): Float {
-        return (1.0f / (1.0f + kotlin.math.exp(-x)))
-    }
-
-    /**
-     * Create a simple dummy mask for warmup
-     */
-    private fun createDummyMask(width: Int, height: Int): Bitmap {
-        return Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-    }
-
-    /**
-     * Convert the segmentation mask to a colored bitmap for visualization
-     */
-    private fun createFloorMaskBitmap(
-        mask: FloatArray,
-        maskWidth: Int,
-        maskHeight: Int,
-        targetWidth: Int,
-        targetHeight: Int
-    ): Bitmap {
-        // Create mask bitmap
-        val maskPixels = IntArray(maskWidth * maskHeight)
-
-        for (i in mask.indices) {
-            val confidence = mask[i]
-            maskPixels[i] = if (confidence > 0.5f) {
-                // Semi-transparent green for floor areas
-                val alpha = (confidence * 128).toInt().coerceIn(32, 128)
-                Color.argb(alpha, 0, 255, 0)
-            } else {
-                Color.TRANSPARENT
+                finalBmp
             }
         }
 
-        val maskBitmap = Bitmap.createBitmap(
-            maskPixels,
-            maskWidth,
-            maskHeight,
-            Bitmap.Config.ARGB_8888
-        )
-
-        // Scale to target size
-        return Bitmap.createScaledBitmap(maskBitmap, targetWidth, targetHeight, true)
-    }
-
     /**
-     * Create a mock floor mask for emulator testing
+     * Create a mock floor mask for emulator testing or fallback
      */
     fun createMockFloorMask(width: Int, height: Int): Bitmap {
-        return Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).apply {
-            val canvas = Canvas(this)
-            // Fill bottom 60% of image with semi-transparent green to simulate floor
-            val floorHeight = (height * 0.6f).toInt()
-            val paint = Paint().apply {
-                color = Color.argb(128, 0, 255, 0)
+        val bitmap = memMgr.getBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+
+        // Fill bottom 60% with semi-transparent green
+        val floorHeight = (height * 0.6f).toInt()
+        val paint = Paint().apply {
+            color = Color.argb(128, 0, 255, 0)
+            isAntiAlias = false
+        }
+        canvas.drawRect(
+            0f,
+            (height - floorHeight).toFloat(),
+            width.toFloat(),
+            height.toFloat(),
+            paint
+        )
+
+        return bitmap
+    }
+
+    /**
+     * Check if ready for inference
+     */
+    fun isReady(): Boolean = isInitialized.get() && !isClosed.get() && !isFirstInference.get()
+
+    /**
+     * Check if warmup complete
+     */
+    fun isWarmedUp(): Boolean = !isFirstInference.get()
+
+    /**
+     * Set quality (0.25 to 1.0)
+     */
+    fun setQuality(q: Float) {
+        quality = q.coerceIn(0.25f, 1.0f)
+        Log.i(TAG, "Quality set to ${(quality * 100).toInt()}%")
+    }
+
+    /**
+     * Get current quality
+     */
+    fun getQuality(): Float = quality
+
+    /**
+     * Force cleanup for memory pressure
+     */
+    /**
+     * Force cleanup for memory pressure
+     */
+    fun forceCleanup() {
+        if (!isClosed.get()) {
+            synchronized(recentFrames) {
+                recentFrames.clear()
             }
-            canvas.drawRect(
-                0f,
-                (height - floorHeight).toFloat(),
-                width.toFloat(),
-                height.toFloat(),
-                paint
-            )
+            memMgr.performGcIfNeeded(context)
+            System.gc()
+            Log.d(TAG, "Force cleanup completed")
         }
     }
 
-    fun close() {
-        if (isClosed.compareAndSet(false, true)) {
-            Log.d(TAG, "Closing ONNX floor segmentation session...")
+    /**
+     * Get performance statistics
+     */
+    fun getPerformanceStats(): PerformanceStats {
+        val frames = frameCount.get()
+        return if (frames > 0) {
+            PerformanceStats(
+                totalFrames = frames,
+                avgInferenceTime = totalInferAcc.get() / frames,
+                avgPreprocessTime = totalPrepAcc.get() / frames,
+                avgPostprocessTime = totalPostAcc.get() / frames,
+                isWarmupComplete = !isFirstInference.get(),
+                currentQuality = quality,
+                concurrentRequests = inFlight.get()
+            )
+        } else {
+            PerformanceStats()
+        }
+    }
 
-            // Cancel warmup if running
-            warmupJob?.cancel()
+    /**
+     * Get health status
+     */
+    fun getHealth(): SegmenterHealth {
+        val stats = getPerformanceStats()
+        val memInfo = memMgr.getMemoryInfo(context)
 
-            synchronized(lock) {
-                try {
-                    session?.close()
-                    session = null
-                    // Don't close environment - it's a singleton
-                    isInitialized.set(false)
-                    Log.d(TAG, "ONNX floor segmentation session closed successfully")
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error closing ONNX session", e)
+        // Simple health check based on response time and memory
+        val isHealthy = stats.avgTotalTime < 1000 && // Less than 1s per frame
+                memInfo.getUsagePercentage() < 85f && // Less than 85% memory
+                isInitialized.get() && !isClosed.get()
+
+        return SegmenterHealth(
+            isHealthy = isHealthy,
+            errorRate = 0f, // Simplified - not tracking errors in this version
+            avgResponseTime = stats.avgTotalTime,
+            memoryPressure = memInfo.getUsagePercentage(),
+            lastError = null,
+            quality = quality,
+            isWarmupComplete = stats.isWarmupComplete
+        )
+    }
+
+    /**
+     * Update performance tracking
+     */
+    private fun updatePerformanceTracking(frameTime: Long) {
+        synchronized(recentFrames) {
+            recentFrames.add(frameTime)
+            if (recentFrames.size > MAX_HIST) {
+                recentFrames.removeAt(0)
+            }
+
+            if (recentFrames.size >= 5) {
+                val avg = recentFrames.average()
+
+                // Dynamic quality adjustment
+                when {
+                    avg > 500 && quality > 0.5f -> {
+                        quality = 0.5f
+                        Log.i(TAG, "⚡ Reducing quality to 50% (avg: ${avg.toInt()}ms)")
+                    }
+                    avg > 300 && quality > 0.75f -> {
+                        quality = 0.75f
+                        Log.i(TAG, "⚡ Reducing quality to 75% (avg: ${avg.toInt()}ms)")
+                    }
+                    avg < 150 && quality < 1.0f -> {
+                        quality = 1.0f
+                        Log.i(TAG, "⚡ Restoring full quality (avg: ${avg.toInt()}ms)")
+                    }
                 }
             }
+        }
+    }
+
+    /** Release all resources */
+    fun close() {
+        if (!isClosed.compareAndSet(false, true)) return
+        try { warmupJob?.cancel() } catch (_: Exception) {}
+        try { session?.close() } catch (_: Exception) {}
+        session = null
+        env = null
+        Log.i(TAG, "ONNX segmenter closed")
+        System.gc()
+    }
+
+    /**
+     * Performance statistics data class
+     */
+    data class PerformanceStats(
+        val totalFrames: Long = 0,
+        val avgInferenceTime: Long = 0,
+        val avgPreprocessTime: Long = 0,
+        val avgPostprocessTime: Long = 0,
+        val isWarmupComplete: Boolean = false,
+        val currentQuality: Float = 1.0f,
+        val concurrentRequests: Int = 0
+    ) {
+        val avgTotalTime: Long get() = avgPreprocessTime + avgInferenceTime + avgPostprocessTime
+        val avgFPS: Float get() = if (avgTotalTime > 0) 1000f / avgTotalTime else 0f
+
+        override fun toString(): String {
+            return "PerformanceStats(frames=$totalFrames, " +
+                    "inference=${avgInferenceTime}ms, " +
+                    "preprocess=${avgPreprocessTime}ms, " +
+                    "postprocess=${avgPostprocessTime}ms, " +
+                    "total=${avgTotalTime}ms, " +
+                    "fps=${String.format("%.1f", avgFPS)}, " +
+                    "quality=${(currentQuality * 100).toInt()}%, " +
+                    "concurrent=$concurrentRequests, " +
+                    "warmedUp=$isWarmupComplete)"
+        }
+    }
+
+    /**
+     * Health monitoring data class
+     */
+    data class SegmenterHealth(
+        val isHealthy: Boolean = true,
+        val errorRate: Float = 0f,
+        val avgResponseTime: Long = 0,
+        val memoryPressure: Float = 0f,
+        val lastError: String? = null,
+        val quality: Float = 1.0f,
+        val isWarmupComplete: Boolean = false
+    ) {
+        override fun toString(): String {
+            return "SegmenterHealth(healthy=$isHealthy, " +
+                    "errors=${String.format("%.1f", errorRate)}%, " +
+                    "avgTime=${avgResponseTime}ms, " +
+                    "memory=${String.format("%.1f", memoryPressure)}%, " +
+                    "quality=${(quality * 100).toInt()}%, " +
+                    "warmedUp=$isWarmupComplete" +
+                    (lastError?.let { ", lastError='$it'" } ?: "") + ")"
         }
     }
 }

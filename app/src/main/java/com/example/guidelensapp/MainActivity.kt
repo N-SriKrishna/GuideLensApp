@@ -1,3 +1,4 @@
+// File: app/src/main/java/com/example/guidelensapp/MainActivity.kt
 package com.example.guidelensapp
 
 import android.Manifest
@@ -26,9 +27,10 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.example.guidelensapp.ui.composables.CameraView
-import com.example.guidelensapp.ui.composables.MainOverlay
+import com.example.guidelensapp.ui.composables.Overlays
 import com.example.guidelensapp.ui.composables.StartScreen
 import com.example.guidelensapp.ui.theme.GuideLensAppTheme
+import com.example.guidelensapp.utils.ThreadManager
 import com.example.guidelensapp.viewmodel.NavigationViewModel
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
@@ -56,6 +58,34 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        viewModel.onLowMemory()
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+
+        when (level) {
+            TRIM_MEMORY_UI_HIDDEN -> {
+                // App is in background
+                viewModel.setQuality(0.5f)
+            }
+            TRIM_MEMORY_RUNNING_MODERATE,
+            TRIM_MEMORY_RUNNING_LOW,
+            TRIM_MEMORY_RUNNING_CRITICAL -> {
+                // Memory pressure while running
+                viewModel.onLowMemory()
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        // Ensure thread manager is shutdown
+        ThreadManager.getInstance().shutdown()
+        super.onDestroy()
+    }
 }
 
 @OptIn(ExperimentalPermissionsApi::class)
@@ -63,30 +93,30 @@ class MainActivity : ComponentActivity() {
 fun AppContent(viewModel: NavigationViewModel) {
     val cameraPermissionState = rememberPermissionState(permission = Manifest.permission.CAMERA)
     val uiState by viewModel.uiState.collectAsState()
+    val context = LocalContext.current
 
     LaunchedEffect(Unit) {
         cameraPermissionState.launchPermissionRequest()
     }
 
     if (cameraPermissionState.status.isGranted) {
-        viewModel.initializeModels(LocalContext.current)
+        LaunchedEffect(Unit) {
+            viewModel.initializeModels(context)
+        }
+
         Box(modifier = Modifier.fillMaxSize()) {
             CameraView(onFrame = { viewModel.onFrame(it) })
-            MainOverlay(uiState = uiState)
-            // Status text overlay at the bottom
-            Text(
-                text = "State: ${uiState.systemState}\nCommand: ${uiState.command}",
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(16.dp),
-                color = Color.White,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold
-            )
+            Overlays(uiState = uiState)
         }
     } else {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text("Camera permission is required to use this app.")
+            Text(
+                "Camera permission is required to use this app.",
+                modifier = Modifier.padding(16.dp),
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onBackground
+            )
         }
     }
 }
