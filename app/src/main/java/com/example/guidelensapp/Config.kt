@@ -5,13 +5,15 @@ object Config {
 
     // --- Model & Detection Configuration ---
     const val TARGET_OBJECT_LABEL = "chair" // The navigation goal object label.
-    const val CONFIDENCE_THRESHOLD = 0.4f // Stricter threshold for detections.
+    const val FLOOR_CONFIDENCE_THRESHOLD = 0.5f
+    const val FLOOR_MASK_ALPHA = 128
 
     // --- Navigation & Logic Configuration ---
     const val PATHFINDING_GRID_SCALE = 15 // Downscale factor for the A* grid. Larger is faster but less precise.
     const val STUCK_TIME_THRESHOLD_MS = 3000L // Time in milliseconds to detect being stuck.
     const val INSTRUCTION_LOCK_DURATION_MS = 1500L // Min time between new navigation commands.
     const val TARGET_REACHED_RADIUS_PX = 60f // Radius around target to consider it "reached".
+
 
     // --- Safety & Inflation ---
     // Instead of a full distance transform, we'll use a simpler grid inflation method.

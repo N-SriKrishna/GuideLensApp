@@ -21,14 +21,17 @@ class ObjectDetector(context: Context) {
     private var labels: List<String> = emptyList()
     private val isNCHW: Boolean
 
-    // Lock to prevent concurrent access to the interpreter
+    // Lock to prevent concurrent access
     private val lock = Any()
+
+    // Throttling
+    private var isProcessing = false
 
     init {
         try {
             val model = FileUtil.loadMappedFile(context, "yolo_world.tflite")
             val options = Interpreter.Options().apply {
-                numThreads = 4
+                numThreads = 2 // Reduce threads to prevent CPU overload
             }
             interpreter = Interpreter(model, options)
         } catch (e: Exception) {
@@ -37,19 +40,16 @@ class ObjectDetector(context: Context) {
 
         val inputShape = interpreter?.getInputTensor(0)?.shape() ?: intArrayOf(0, 0, 0, 0)
 
-        // Detect format: NCHW [1, 3, H, W] or NHWC [1, H, W, 3]
         isNCHW = inputShape[1] == 3 || inputShape[1] < 10
 
         if (isNCHW) {
-            // Format: [batch, channels, height, width]
             inputHeight = inputShape[2]
             inputWidth = inputShape[3]
-            Log.d("ObjectDetector", "Detected NCHW format: [${inputShape[0]}, ${inputShape[1]}, $inputHeight, $inputWidth]")
+            Log.d("ObjectDetector", "Model input: NCHW [$inputWidth x $inputHeight]")
         } else {
-            // Format: [batch, height, width, channels]
             inputHeight = inputShape[1]
             inputWidth = inputShape[2]
-            Log.d("ObjectDetector", "Detected NHWC format: [${inputShape[0]}, $inputHeight, $inputWidth, ${inputShape[3]}]")
+            Log.d("ObjectDetector", "Model input: NHWC [$inputWidth x $inputHeight]")
         }
 
         setCustomVocabulary(listOf("chair", "table", "person", "door"))
@@ -60,47 +60,55 @@ class ObjectDetector(context: Context) {
     }
 
     fun detect(bitmap: Bitmap): List<DetectionResult> {
+        // Skip if already processing
+        if (isProcessing) {
+            Log.d("ObjectDetector", "Skipping frame - already processing")
+            return emptyList()
+        }
+
         val localInterpreter = interpreter ?: return emptyList()
 
-        // Synchronize to prevent concurrent access
         synchronized(lock) {
+            isProcessing = true
             try {
-                // ✅ Resize the bitmap to model input size
+                val startTime = System.currentTimeMillis()
+
+                // Resize bitmap
                 val resizedBitmap = Bitmap.createScaledBitmap(bitmap, inputWidth, inputHeight, true)
 
-                Log.d("ObjectDetector", "Processing frame: ${resizedBitmap.width} x ${resizedBitmap.height}")
-
-                // ✅ Convert bitmap to ByteBuffer
+                // Convert to ByteBuffer
                 val inputBuffer = if (isNCHW) {
                     convertBitmapToByteBufferNCHW(resizedBitmap)
                 } else {
                     convertBitmapToByteBufferNHWC(resizedBitmap)
                 }
 
-                // ✅ Get output tensor info
+                // Get output info
                 val outputTensor = localInterpreter.getOutputTensor(0)
                 val outputShape = outputTensor.shape()
-
-                Log.d("ObjectDetector", "Output shape: ${outputShape.contentToString()}")
-
-                // ✅ Prepare output buffer
                 val outputBuffer = ByteBuffer.allocateDirect(outputTensor.numBytes())
                 outputBuffer.order(ByteOrder.nativeOrder())
 
-                // ✅ Run inference
+                // Run inference
                 localInterpreter.run(inputBuffer, outputBuffer)
 
-                // ✅ Post-process results
-                return processOutput(outputBuffer, outputShape, bitmap.width, bitmap.height)
+                // Process output
+                val results = processYOLOOutput(outputBuffer, outputShape, bitmap.width, bitmap.height)
+
+                val endTime = System.currentTimeMillis()
+                Log.d("ObjectDetector", "Detection took ${endTime - startTime}ms, found ${results.size} objects")
+
+                return results
 
             } catch (e: Exception) {
                 Log.e("ObjectDetector", "Error during detection", e)
                 return emptyList()
+            } finally {
+                isProcessing = false
             }
         }
     }
 
-    // For models with NCHW format (channels first): [batch, channels, height, width]
     private fun convertBitmapToByteBufferNCHW(bitmap: Bitmap): ByteBuffer {
         val width = bitmap.width
         val height = bitmap.height
@@ -110,14 +118,13 @@ class ObjectDetector(context: Context) {
         val intValues = IntArray(width * height)
         bitmap.getPixels(intValues, 0, width, 0, 0, width, height)
 
-        // YOLO models typically expect values normalized to [0, 1]
-        // Write all R values, then all G values, then all B values
+        // Write all R, then all G, then all B
         for (channel in 0..2) {
             for (pixelValue in intValues) {
                 val value = when (channel) {
-                    0 -> (pixelValue shr 16) and 0xFF  // R
-                    1 -> (pixelValue shr 8) and 0xFF   // G
-                    else -> pixelValue and 0xFF        // B
+                    0 -> (pixelValue shr 16) and 0xFF
+                    1 -> (pixelValue shr 8) and 0xFF
+                    else -> pixelValue and 0xFF
                 }
                 byteBuffer.putFloat(value / 255.0f)
             }
@@ -127,7 +134,6 @@ class ObjectDetector(context: Context) {
         return byteBuffer
     }
 
-    // For models with NHWC format (channels last): [batch, height, width, channels]
     private fun convertBitmapToByteBufferNHWC(bitmap: Bitmap): ByteBuffer {
         val width = bitmap.width
         val height = bitmap.height
@@ -137,18 +143,17 @@ class ObjectDetector(context: Context) {
         val intValues = IntArray(width * height)
         bitmap.getPixels(intValues, 0, width, 0, 0, width, height)
 
-        // Write R, G, B for each pixel in sequence
         for (pixelValue in intValues) {
-            byteBuffer.putFloat(((pixelValue shr 16) and 0xFF) / 255.0f)  // R
-            byteBuffer.putFloat(((pixelValue shr 8) and 0xFF) / 255.0f)   // G
-            byteBuffer.putFloat((pixelValue and 0xFF) / 255.0f)           // B
+            byteBuffer.putFloat(((pixelValue shr 16) and 0xFF) / 255.0f)
+            byteBuffer.putFloat(((pixelValue shr 8) and 0xFF) / 255.0f)
+            byteBuffer.putFloat((pixelValue and 0xFF) / 255.0f)
         }
 
         byteBuffer.rewind()
         return byteBuffer
     }
 
-    private fun processOutput(
+    private fun processYOLOOutput(
         buffer: ByteBuffer,
         outputShape: IntArray,
         originalWidth: Int,
@@ -156,71 +161,80 @@ class ObjectDetector(context: Context) {
     ): List<DetectionResult> {
         buffer.rewind()
 
-        // YOLO output format is typically [1, num_predictions, num_classes+4]
-        // or [1, num_classes+4, num_predictions]
+        // YOLO output: [1, 84, 8400] means:
+        // - 1 batch
+        // - 84 values per prediction (4 bbox + 80 classes)
+        // - 8400 predictions
+
+        val numClasses = outputShape[1] - 4  // 80 classes
+        val numPredictions = outputShape[2]  // 8400 predictions
+
         val boxes = mutableListOf<DetectionResult>()
+        val confidenceThreshold = 0.4f  // Increased threshold for better performance
+        val maxBoxes = 20  // Limit max boxes for performance
 
-        try {
-            // Common YOLO format: [batch, predictions, (x, y, w, h, class_scores...)]
-            if (outputShape.size >= 3) {
-                val numPredictions = if (outputShape[1] > outputShape[2]) outputShape[2] else outputShape[1]
-                val numValues = if (outputShape[1] > outputShape[2]) outputShape[1] else outputShape[2]
-                val numClasses = numValues - 4
+        // Read predictions efficiently
+        for (i in 0 until numPredictions) {
+            // Read bbox coordinates (4 values)
+            val cx = buffer.float
+            val cy = buffer.float
+            val w = buffer.float
+            val h = buffer.float
 
-                Log.d("ObjectDetector", "Predictions: $numPredictions, Classes: $numClasses")
+            // Find max class score and index
+            var maxScore = 0f
+            var maxIndex = -1
 
-                for (i in 0 until minOf(numPredictions, 100)) { // Limit to first 100 predictions
-                    val floatArray = FloatArray(numValues)
-                    for (j in 0 until numValues) {
-                        floatArray[j] = buffer.float
-                    }
-
-                    // Find class with highest score
-                    var maxScore = -1f
-                    var labelIndex = -1
-                    for (j in 4 until numValues) {
-                        if (floatArray[j] > maxScore) {
-                            maxScore = floatArray[j]
-                            labelIndex = j - 4
-                        }
-                    }
-
-                    if (maxScore > 0.3f) { // Confidence threshold
-                        // YOLO typically outputs normalized coordinates [0, 1]
-                        val cx = floatArray[0] * originalWidth
-                        val cy = floatArray[1] * originalHeight
-                        val w = floatArray[2] * originalWidth
-                        val h = floatArray[3] * originalHeight
-
-                        val left = cx - w / 2
-                        val top = cy - h / 2
-                        val right = cx + w / 2
-                        val bottom = cy + h / 2
-
-                        val label = if (labelIndex >= 0 && labelIndex < labels.size) {
-                            labels[labelIndex]
-                        } else {
-                            "Object"
-                        }
-
-                        boxes.add(DetectionResult(RectF(left, top, right, bottom), label, maxScore))
-                    }
+            for (c in 0 until numClasses) {
+                val score = buffer.float
+                if (score > maxScore) {
+                    maxScore = score
+                    maxIndex = c
                 }
             }
-        } catch (e: Exception) {
-            Log.e("ObjectDetector", "Error processing output", e)
+
+            // Only keep high confidence detections
+            if (maxScore > confidenceThreshold && boxes.size < maxBoxes) {
+                // Convert from normalized coords to pixel coords
+                val centerX = cx * originalWidth
+                val centerY = cy * originalHeight
+                val width = w * originalWidth
+                val height = h * originalHeight
+
+                val left = centerX - width / 2
+                val top = centerY - height / 2
+                val right = centerX + width / 2
+                val bottom = centerY + height / 2
+
+                // Validate bounds
+                if (left >= 0 && top >= 0 && right <= originalWidth && bottom <= originalHeight) {
+                    val label = if (maxIndex >= 0 && maxIndex < labels.size) {
+                        labels[maxIndex]
+                    } else {
+                        "Object"
+                    }
+
+                    boxes.add(DetectionResult(
+                        RectF(left, top, right, bottom),
+                        label,
+                        maxScore
+                    ))
+                }
+            }
         }
 
-        return nonMaxSuppression(boxes)
+        return nonMaxSuppression(boxes, iouThreshold = 0.4f)
     }
 
-    private fun nonMaxSuppression(boxes: List<DetectionResult>, iouThreshold: Float = 0.5f): List<DetectionResult> {
+    private fun nonMaxSuppression(boxes: List<DetectionResult>, iouThreshold: Float): List<DetectionResult> {
         if (boxes.isEmpty()) return emptyList()
 
         val sortedBoxes = boxes.sortedByDescending { it.confidence }
         val selectedBoxes = mutableListOf<DetectionResult>()
 
         for (box in sortedBoxes) {
+            if (selectedBoxes.size >= 10) break  // Limit to 10 boxes max
+
             var shouldSelect = true
             for (selected in selectedBoxes) {
                 if (calculateIoU(box.boundingBox, selected.boundingBox) > iouThreshold) {
@@ -233,7 +247,6 @@ class ObjectDetector(context: Context) {
             }
         }
 
-        Log.d("ObjectDetector", "NMS: ${boxes.size} -> ${selectedBoxes.size} boxes")
         return selectedBoxes
     }
 
