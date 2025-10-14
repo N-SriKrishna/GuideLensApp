@@ -130,6 +130,7 @@ fun ObjectSelectorView(
                                 },
                                 modifier = Modifier.clickable {
                                     selectedObject = obj
+                                    onTargetSelected(obj)
                                     showDropdown = false
                                 },
                                 colors = ListItemDefaults.colors(

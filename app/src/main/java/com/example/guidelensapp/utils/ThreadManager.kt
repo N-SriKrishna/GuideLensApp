@@ -7,7 +7,6 @@ import android.util.Log
 import kotlin.coroutines.CoroutineContext
 
 class ThreadManager private constructor() {
-
     companion object {
         private const val TAG = "ThreadManager"
 
@@ -24,30 +23,46 @@ class ThreadManager private constructor() {
     // CPU core count detection
     private val coreCount = Runtime.getRuntime().availableProcessors()
 
+    // Adaptive thread pool sizing
+    private val mlThreads = 1  // Always single thread for ML to avoid context switching
+
+    private val imageThreadsMin = when {
+        coreCount >= 8 -> 2
+        coreCount >= 4 -> 1
+        else -> 1
+    }
+
+    private val imageThreadsMax = when {
+        coreCount >= 8 -> 4
+        coreCount >= 6 -> 3
+        coreCount >= 4 -> 2
+        else -> 1
+    }
+
     // Specialized thread pools
     private val mlInferenceExecutor = ThreadPoolExecutor(
-        1, // Single thread for ML inference to avoid context switching
-        1,
+        mlThreads,
+        mlThreads,
         60L, TimeUnit.SECONDS,
-        LinkedBlockingQueue(3), // Small queue to prevent backlog
+        LinkedBlockingQueue(3),
         { r -> Thread(r, "ML-Inference").apply { priority = Thread.MAX_PRIORITY } },
-        ThreadPoolExecutor.DiscardOldestPolicy() // Drop old tasks if queue full
+        ThreadPoolExecutor.DiscardOldestPolicy()
     )
 
     private val imageProcessingExecutor = ThreadPoolExecutor(
-        minOf(2, coreCount - 1), // Use available cores but leave one for UI
-        minOf(4, coreCount),
+        imageThreadsMin,
+        imageThreadsMax,
         30L, TimeUnit.SECONDS,
         LinkedBlockingQueue(5),
         { r -> Thread(r, "Image-Processing-${Thread.currentThread().id}").apply {
             priority = Thread.NORM_PRIORITY + 1
         } },
-        ThreadPoolExecutor.CallerRunsPolicy() // Backpressure handling
+        ThreadPoolExecutor.CallerRunsPolicy()
     )
 
     private val ioExecutor = ThreadPoolExecutor(
         2,
-        4,
+        minOf(4, coreCount),
         60L, TimeUnit.SECONDS,
         LinkedBlockingQueue(10),
         { r -> Thread(r, "IO-${Thread.currentThread().id}").apply {
@@ -61,7 +76,6 @@ class ThreadManager private constructor() {
     val imageProcessingDispatcher = imageProcessingExecutor.asCoroutineDispatcher()
     val ioDispatcher = ioExecutor.asCoroutineDispatcher()
 
-    // Background scope for app-wide background tasks
     val backgroundScope = CoroutineScope(
         SupervisorJob() +
                 CoroutineName("AppBackground") +
@@ -70,9 +84,9 @@ class ThreadManager private constructor() {
 
     init {
         Log.d(TAG, "ThreadManager initialized. CPU cores: $coreCount")
-        Log.d(TAG, "ML Inference: 1 thread (high priority)")
-        Log.d(TAG, "Image Processing: ${minOf(2, coreCount - 1)}-${minOf(4, coreCount)} threads")
-        Log.d(TAG, "IO Operations: 2-4 threads")
+        Log.d(TAG, "ML Inference: $mlThreads thread (high priority)")
+        Log.d(TAG, "Image Processing: $imageThreadsMin-$imageThreadsMax threads")
+        Log.d(TAG, "IO Operations: 2-${minOf(4, coreCount)} threads")
     }
 
     /**

@@ -1,7 +1,5 @@
 package com.example.guidelensapp
 
-// app/src/main/java/com/example/guidelensapp/GuideLensApplication.kt
-
 import android.app.Application
 import android.util.Log
 import com.example.guidelensapp.utils.MemoryManager
@@ -15,6 +13,14 @@ class GuideLensApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "Initializing GuideLens application")
+
+        // Initialize device-adaptive configuration FIRST
+        try {
+            Config.initialize(this)
+            Log.d(TAG, "Device configuration:\n${Config.getDeviceInfo()}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to initialize Config", e)
+        }
 
         // Initialize global managers
         try {

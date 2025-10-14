@@ -197,10 +197,19 @@ class NavigationViewModel : ViewModel() {
 
 
     fun setTargetObject(objectLabel: String) {
-        _uiState.update { it.copy(targetObject = objectLabel.lowercase().trim()) }
-        Log.d(TAG, "🎯 Target object changed to: ${objectLabel.lowercase().trim()}")
-        _uiState.update { it.copy(targetPosition = null, path = null) }
+        val normalizedLabel = objectLabel.lowercase().trim()
+        _uiState.update {
+            it.copy(
+                targetObject = normalizedLabel,
+                targetPosition = null,
+                path = null,
+                pathPoints = null,
+                floorMaskOverlay = null  // Also reset floor mask
+            )
+        }
+        Log.d(TAG, "🎯 Target object changed to: $normalizedLabel")
     }
+
 
     fun toggleObjectSelector() {
         _uiState.update { it.copy(showObjectSelector = !it.showObjectSelector) }
