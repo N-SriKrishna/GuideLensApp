@@ -12,7 +12,6 @@ import com.example.guidelensapp.ml.ObjectDetector
 import com.example.guidelensapp.ml.FloorSegmenter
 import com.example.guidelensapp.navigation.NavigationOutput
 import com.example.guidelensapp.navigation.PathPlanner
-import com.example.guidelensapp.utils.MemoryManager
 import com.example.guidelensapp.utils.ThreadManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -30,11 +29,6 @@ class NavigationViewModel : ViewModel() {
     private var applicationContext: Context? = null
 
     private val threadManager = ThreadManager.getInstance()
-    private val memoryManager = MemoryManager.getInstance()
-
-    private val isEmulator = android.os.Build.FINGERPRINT.contains("generic") ||
-            android.os.Build.FINGERPRINT.contains("unknown") ||
-            android.os.Build.MODEL.contains("Emulator")
 
     private val isProcessingFrame = AtomicBoolean(false)
     private val lastProcessedTime = AtomicLong(0L)
@@ -218,16 +212,6 @@ class NavigationViewModel : ViewModel() {
     fun startNavigation() {
         _uiState.update { it.copy(isNavigating = true, showObjectSelector = false) }
         Log.d(TAG, "▶️ Navigation STARTED")
-    }
-
-    fun stopNavigation() {
-        _uiState.update { it.copy(isNavigating = false, showObjectSelector = true) }
-        Log.d(TAG, "⏸️ Navigation STOPPED")
-    }
-
-    fun onLowMemory() {
-        Log.w(TAG, "⚠️ Low memory warning received")
-        memoryManager.forceGarbageCollection()
     }
 
     override fun onCleared() {

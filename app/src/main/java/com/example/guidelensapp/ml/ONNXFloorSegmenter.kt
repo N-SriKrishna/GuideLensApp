@@ -11,10 +11,13 @@ import android.content.ContentValues.TAG
 import kotlinx.coroutines.*
 import java.nio.FloatBuffer
 import java.util.concurrent.atomic.AtomicBoolean
+import androidx.core.graphics.scale
+import androidx.core.graphics.createBitmap
+import androidx.core.graphics.set
 
 class ONNXFloorSegmenter(
-    private val context: Context,
-    private val useQuantized: Boolean = true
+    private val context: Context
+
 ) {
     private val TAG = "ONNXFloorSegmenter"
     private val MODEL_NAME = "floor_segmentation_int8.onnx"  // Make sure this file exists!
@@ -40,7 +43,7 @@ class ONNXFloorSegmenter(
                 // Check if model exists
                 val modelStream = try {
                     context.assets.open(MODEL_NAME)
-                } catch (e: Exception) {
+                } catch (_: Exception) {
                     Log.e(TAG, "❌ Model file NOT FOUND: $MODEL_NAME")
                     Log.e(TAG, "Available assets: ${context.assets.list("")?.joinToString()}")
                     isCrashed.set(true)
@@ -127,7 +130,7 @@ class ONNXFloorSegmenter(
 
     private fun preprocessImage(bitmap: Bitmap): OnnxTensor? {
         return try {
-            val resized = Bitmap.createScaledBitmap(bitmap, MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT, true)
+            val resized = bitmap.scale(MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT)
             val floatArray = FloatArray(1 * 3 * MODEL_INPUT_HEIGHT * MODEL_INPUT_WIDTH)
             val pixels = IntArray(MODEL_INPUT_WIDTH * MODEL_INPUT_HEIGHT)
             resized.getPixels(pixels, 0, MODEL_INPUT_WIDTH, 0, 0, MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT)
@@ -174,7 +177,7 @@ class ONNXFloorSegmenter(
                 }
                 is FloatArray -> {
                     // Handle flat array (rare)
-                    val mask = Bitmap.createBitmap(MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT, Bitmap.Config.ARGB_8888)
+                    val mask = createBitmap(MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT)
                     val pixels = IntArray(MODEL_INPUT_WIDTH * MODEL_INPUT_HEIGHT)
                     for (i in output.indices) {
                         pixels[i] = if (output[i] > 0.5f)
@@ -191,7 +194,7 @@ class ONNXFloorSegmenter(
                 }
             }
 
-            val scaledMask = Bitmap.createScaledBitmap(maskBitmap, width, height, true)
+            val scaledMask = maskBitmap.scale(width, height)
             maskBitmap.recycle()
 
             Log.d(TAG, "✅ Mask processed ${scaledMask.width}x${scaledMask.height}")
@@ -207,7 +210,7 @@ class ONNXFloorSegmenter(
 
     fun createMockFloorMask(width: Int, height: Int): Bitmap {
         Log.d(TAG, "🎭 Creating MOCK floor mask ${width}x${height}")
-        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val bitmap = createBitmap(width, height)
         val canvas = Canvas(bitmap)
         val paint = Paint().apply {
             color = Color.argb(180, 0, 255, 0)  // ✅ FIXED: Increased alpha from 128 to 180
@@ -227,34 +230,23 @@ class ONNXFloorSegmenter(
     }
 
 
-    fun forceCleanup() {
-        try {
-            session?.close()
-            session = null
-        } catch (e: Exception) {
-            Log.e(TAG, "Cleanup error", e)
-        }
-    }
-
-    fun setQuality(quality: Float) {}
-    fun close() { forceCleanup() }
 }
 
 private fun convertOutputToBitmap(outputTensor: Array<Array<Array<FloatArray>>>): Bitmap {
     val height = outputTensor[0][0].size
     val width = outputTensor[0][0][0].size
-    val maskBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    val maskBitmap = createBitmap(width, height)
 
     for (y in 0 until height) {
         for (x in 0 until width) {
             val value = outputTensor[0][0][y][x]
             // Convert probability to color
             val color = if (value > 0.5f) {
-                android.graphics.Color.argb(200, 0, 255, 0)  // visible green overlay
+                Color.argb(200, 0, 255, 0)  // visible green overlay
             } else {
-                android.graphics.Color.TRANSPARENT
+                Color.TRANSPARENT
             }
-            maskBitmap.setPixel(x, y, color)
+            maskBitmap[x, y] = color
         }
     }
     Log.d(TAG, "✅ Mask generated $width x $height")

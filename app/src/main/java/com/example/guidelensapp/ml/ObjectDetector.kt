@@ -1,15 +1,17 @@
 package com.example.guidelensapp.ml
 
+import ai.onnxruntime.OnnxTensor
+import ai.onnxruntime.OrtEnvironment
+import ai.onnxruntime.OrtSession
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.RectF
 import android.util.Log
-import ai.onnxruntime.*
-import android.content.ContentValues.TAG
 import com.example.guidelensapp.Config
 import java.nio.FloatBuffer
 import kotlin.math.max
 import kotlin.math.min
+import androidx.core.graphics.scale
 
 class ObjectDetector(private val context: Context) {
     private var session: OrtSession? = null
@@ -85,18 +87,12 @@ class ObjectDetector(private val context: Context) {
         }
     }
 
-    fun detectTargetObject(bitmap: Bitmap, targetObject: String): List<DetectionResult> {
-        return detectObjects(bitmap, listOf(targetObject))
-    }
-
     fun detectObjects(bitmap: Bitmap, filterClasses: List<String> = emptyList()): List<DetectionResult> {
         // CRASH PROTECTION
         if (session == null) {
             Log.e(TAG, "❌ Session is null, model not loaded")
             return emptyList()
         }
-
-        val startTime = System.currentTimeMillis()
 
         return try {
             detectObjectsInternal(bitmap, filterClasses)
@@ -166,7 +162,7 @@ class ObjectDetector(private val context: Context) {
                     }
                 }
                 is FloatBuffer -> {
-                    val buffer = outputValue as FloatBuffer
+                    val buffer = outputValue
                     buffer.rewind()
                     val floatArray = FloatArray(buffer.remaining())
                     buffer.get(floatArray)
@@ -196,12 +192,7 @@ class ObjectDetector(private val context: Context) {
     }
 
     private fun preprocessImageOptimized(bitmap: Bitmap): OnnxTensor {
-        val resizedBitmap = Bitmap.createScaledBitmap(
-            bitmap,
-            inputSize,
-            inputSize,
-            true
-        )
+        val resizedBitmap = bitmap.scale(inputSize, inputSize)
 
         val floatArray = FloatArray(1 * 3 * inputSize * inputSize)
         val pixels = IntArray(inputSize * inputSize)

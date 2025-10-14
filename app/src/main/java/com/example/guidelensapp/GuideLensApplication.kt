@@ -4,6 +4,7 @@ import android.app.Application
 import android.util.Log
 import com.example.guidelensapp.utils.MemoryManager
 import com.example.guidelensapp.utils.ThreadManager
+import kotlin.system.exitProcess
 
 class GuideLensApplication : Application() {
     companion object {
@@ -43,12 +44,12 @@ class GuideLensApplication : Application() {
             // Force cleanup
             try {
                 MemoryManager.getInstance().forceGarbageCollection()
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 // Ignore
             }
 
             android.os.Process.killProcess(android.os.Process.myPid())
-            System.exit(10)
+            exitProcess(10)
         }
     }
 }

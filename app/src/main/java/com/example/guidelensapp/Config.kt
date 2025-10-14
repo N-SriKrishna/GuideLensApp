@@ -32,7 +32,7 @@ object Config {
         val isHighEnd = totalRamMB >= 8192 && cpuCores >= 8
 
         // Detect accelerator support
-        val hasNNAPI = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+        val hasNNAPI = true
         val hasHexagon = deviceName.contains("SM-", ignoreCase = true) ||
                 deviceName.contains("Pixel", ignoreCase = true)
 
@@ -58,14 +58,8 @@ object Config {
         "phone", "keyboard", "mouse"
     )
 
-    const val FLOOR_CONFIDENCE_THRESHOLD = 0.5f
-    const val FLOOR_MASK_ALPHA = 128
-
     // --- Navigation & Logic Configuration ---
     const val PATHFINDING_GRID_SCALE = 15
-    const val STUCK_TIME_THRESHOLD_MS = 3000L
-    const val INSTRUCTION_LOCK_DURATION_MS = 1500L
-    const val TARGET_REACHED_RADIUS_PX = 60f
     const val PP_LOOKAHEAD_DISTANCE_PX = 100f
     const val PP_SHARP_TURN_K = 0.05f
     const val PP_SLIGHT_TURN_K = 0.02f
@@ -96,21 +90,7 @@ object Config {
     val MAX_DETECTIONS_PER_FRAME: Int
         get() = if (deviceCaps.isHighEnd) 10 else 8
 
-    const val SKIP_FLOOR_WHEN_NO_TARGET = true
     const val MODEL_INPUT_SIZE = 640
-
-    // Bitmap pooling
-    const val ENABLE_BITMAP_POOLING = true
-
-    val MAX_BITMAP_POOL_SIZE: Int
-        get() = if (deviceCaps.isHighEnd) 5 else 3
-
-    // Frame skipping for lower-end devices
-    val SKIP_FRAMES: Boolean
-        get() = !deviceCaps.isHighEnd
-
-    val PROCESS_EVERY_N_FRAMES: Int
-        get() = if (deviceCaps.isHighEnd) 1 else 2
 
     // Hardware acceleration
     val USE_GPU_DELEGATE: Boolean

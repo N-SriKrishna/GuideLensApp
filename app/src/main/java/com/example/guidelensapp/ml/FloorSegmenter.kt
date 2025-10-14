@@ -7,12 +7,12 @@ import android.util.Log
 /**
  * Wrapper class that uses ONNX-based floor segmentation
  */
-class FloorSegmenter(private val context: Context) {
+class FloorSegmenter(context: Context) {
     companion object {
         private const val TAG = "FloorSegmenter"
     }
 
-    private val onnxSegmenter: ONNXFloorSegmenter = ONNXFloorSegmenter(context, useQuantized = true)
+    private val onnxSegmenter: ONNXFloorSegmenter = ONNXFloorSegmenter(context)
 
     // Emulator detection
     private val isEmulator = android.os.Build.FINGERPRINT.contains("generic") ||
@@ -47,25 +47,4 @@ class FloorSegmenter(private val context: Context) {
      */
     fun isReady() = onnxSegmenter.isReady()
 
-    /**
-     * Set quality (0.25 to 1.0)
-     */
-    fun setQuality(quality: Float) = onnxSegmenter.setQuality(quality)
-
-    /**
-     * Force cleanup if memory pressure
-     */
-    fun forceCleanup() = onnxSegmenter.forceCleanup()
-
-    /**
-     * Close and cleanup resources
-     */
-    fun close() {
-        try {
-            onnxSegmenter.close()
-            Log.d(TAG, "FloorSegmenter closed")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error closing FloorSegmenter", e)
-        }
-    }
 }

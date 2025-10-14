@@ -18,6 +18,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.viewinterop.AndroidView
 import java.util.concurrent.Executors
+import androidx.core.graphics.createBitmap
 
 @Composable
 fun CameraView(onFrame: (Bitmap) -> Unit) {
@@ -110,11 +111,7 @@ private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap {
     val rowStride = plane.rowStride
     val rowPadding = rowStride - pixelStride * imageProxy.width
 
-    val bitmap = Bitmap.createBitmap(
-        imageProxy.width + rowPadding / pixelStride,
-        imageProxy.height,
-        Bitmap.Config.ARGB_8888
-    )
+    val bitmap = createBitmap(imageProxy.width + rowPadding / pixelStride, imageProxy.height)
 
     bitmap.copyPixelsFromBuffer(buffer)
 

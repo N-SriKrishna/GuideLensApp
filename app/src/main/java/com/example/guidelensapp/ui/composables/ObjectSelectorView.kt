@@ -9,6 +9,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material3.*
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -116,7 +117,7 @@ fun ObjectSelectorView(
                         fontWeight = FontWeight.Bold
                     )
 
-                    Divider()
+                    HorizontalDivider(Modifier, DividerDefaults.Thickness, DividerDefaults.color)
 
                     LazyColumn {
                         items(Config.NAVIGABLE_OBJECTS) { obj ->
@@ -147,104 +148,3 @@ fun ObjectSelectorView(
     }
 }
 
-// Alternative: Text Input Version
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun ObjectSelectorTextInput(
-    currentTarget: String,
-    onTargetSelected: (String) -> Unit,
-    onStartNavigation: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    var textInput by remember { mutableStateOf(currentTarget) }
-    var showSuggestions by remember { mutableStateOf(false) }
-
-    val filteredSuggestions = Config.NAVIGABLE_OBJECTS.filter {
-        it.contains(textInput, ignoreCase = true)
-    }
-
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(Color.Black.copy(alpha = 0.7f))
-            .padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        Text(
-            text = "Enter Object to Navigate",
-            color = Color.White,
-            fontSize = 20.sp,
-            fontWeight = FontWeight.Bold
-        )
-
-        // Text Field with autocomplete
-        // Text Field with autocomplete
-        OutlinedTextField(
-            value = textInput,
-            onValueChange = {
-                textInput = it
-                showSuggestions = it.isNotEmpty()
-            },
-            modifier = Modifier.fillMaxWidth(),
-            placeholder = { Text("e.g., chair, door, table") },
-            colors = TextFieldDefaults.colors( // <-- Corrected to use colors
-                unfocusedContainerColor = Color.White,
-                focusedContainerColor = Color.White,
-                focusedIndicatorColor = MaterialTheme.colorScheme.primary,
-                unfocusedIndicatorColor = Color.Gray
-            ),
-            singleLine = true,
-            shape = RoundedCornerShape(8.dp)
-        )
-
-
-        // Suggestions dropdown
-        if (showSuggestions && filteredSuggestions.isNotEmpty()) {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(8.dp)
-            ) {
-                Column(modifier = Modifier.heightIn(max = 200.dp)) {
-                    filteredSuggestions.take(5).forEach { suggestion ->
-                        Text(
-                            text = suggestion.replaceFirstChar { it.uppercase() },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    textInput = suggestion
-                                    showSuggestions = false
-                                }
-                                .padding(12.dp),
-                            fontSize = 16.sp
-                        )
-                        if (suggestion != filteredSuggestions.last()) {
-                            Divider()
-                        }
-                    }
-                }
-            }
-        }
-
-        Button(
-            onClick = {
-                onTargetSelected(textInput)
-                onStartNavigation()
-            },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(56.dp),
-            enabled = textInput.isNotBlank(),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.primary
-            ),
-            shape = RoundedCornerShape(8.dp)
-        ) {
-            Text(
-                text = "Start Navigation",
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold
-            )
-        }
-    }
-}

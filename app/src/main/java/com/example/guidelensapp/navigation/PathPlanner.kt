@@ -8,6 +8,8 @@ import java.util.*
 import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.pow
+import androidx.core.graphics.scale
+import androidx.core.graphics.get
 
 private data class Node(
     val x: Int,
@@ -43,7 +45,6 @@ class PathPlanner {
                 return NavigationOutput("Searching for target...")
             }
 
-            val startTime = System.currentTimeMillis()
             val userPosition = PointF(imageWidth / 2f, imageHeight * 0.8f)
 
             // Create navigation grid
@@ -95,12 +96,12 @@ class PathPlanner {
             }
 
             val grid = Array(gridWidth) { BooleanArray(gridHeight) }
-            val scaledMask = Bitmap.createScaledBitmap(mask, gridWidth, gridHeight, false)
+            val scaledMask = mask.scale(gridWidth, gridHeight, false)
 
             // FIXED: Check for green channel (floor mask is green overlay)
             for (x in 0 until gridWidth) {
                 for (y in 0 until gridHeight) {
-                    val pixel = scaledMask.getPixel(x, y)
+                    val pixel = scaledMask[x, y]
                     val alpha = (pixel ushr 24) and 0xFF
                     val green = (pixel ushr 8) and 0xFF
                     // Walkable if has transparency AND green component
@@ -157,7 +158,6 @@ class PathPlanner {
             val end = Node(endX, endY)
 
             val nodePath = findPathAStar(start, end, grid)
-            val pruned = nodePath?.let { prunePath(it, grid) } ?: return emptyList()
 
             if (nodePath.isNullOrEmpty()) {
                 return emptyList()
@@ -174,7 +174,6 @@ class PathPlanner {
 
         // Helpers: pack/unpack coords into Int key for maps/sets
         private fun key(x: Int, y: Int) = (x shl 16) or (y and 0xFFFF)
-        private fun unpackKey(key: Int): Pair<Int, Int> = Pair(key shr 16, key and 0xFFFF)
 
         /**
          * Find the nearest walkable cell to (x,y) using BFS on grid. Returns Pair(x,y) or null.
@@ -241,7 +240,7 @@ class PathPlanner {
             val eNode = Node(eX, eY)
 
             // open list (min-heap) and map for O(1) lookup and updates
-            val openList = PriorityQueue<Node>(compareBy<Node> { it.f }.thenBy { it.h })
+            val openList = PriorityQueue(compareBy<Node> { it.f }.thenBy { it.h })
             val openMap = mutableMapOf<Int, Node>() // key->node
             val closed = Array(gridWidth) { BooleanArray(gridHeight) }
 
@@ -269,7 +268,9 @@ class PathPlanner {
                     return reconstructPath(current)
                 }
 
-                closed[current.x][current.y] = true
+                if (current != null) {
+                    closed[current.x][current.y] = true
+                }
 
                 for ((dx, dy) in dirs) {
                     val nx = current.x + dx
@@ -316,61 +317,6 @@ class PathPlanner {
                 curr = curr.parent
             }
             return path.reversed()
-        }
-
-        /**
-         * Simple path pruning: remove intermediate nodes when straight line between A and B is free (Bresenham collision check).
-         */
-        private fun prunePath(nodePath: List<Node>, grid: Array<BooleanArray>): List<Node> {
-            if (nodePath.size <= 2) return nodePath
-            val pruned = mutableListOf<Node>()
-            var i = 0
-            while (i < nodePath.size) {
-                var j = nodePath.size - 1
-                // find farthest j >= i that is line-of-sight reachable
-                while (j > i) {
-                    if (lineOfSight(nodePath[i], nodePath[j], grid)) break
-                    j--
-                }
-                pruned.add(nodePath[i])
-                i = j
-                if (i == nodePath.size - 1) {
-                    pruned.add(nodePath.last())
-                    break
-                }
-            }
-            return pruned
-        }
-
-        /**
-         * Bresenham line collision check for grid boolean occupancy.
-         * Returns true if the straight line between a and b is entirely walkable.
-         */
-        private fun lineOfSight(a: Node, b: Node, grid: Array<BooleanArray>): Boolean {
-            var x0 = a.x
-            var y0 = a.y
-            val x1 = b.x
-            val y1 = b.y
-            val dx = kotlin.math.abs(x1 - x0)
-            val dy = kotlin.math.abs(y1 - y0)
-            var sx = if (x0 < x1) 1 else -1
-            var sy = if (y0 < y1) 1 else -1
-            var err = dx - dy
-
-            while (true) {
-                if (!grid[x0][y0]) return false
-                if (x0 == x1 && y0 == y1) break
-                val e2 = 2 * err
-                if (e2 > -dy) {
-                    err -= dy
-                    x0 += sx
-                }
-                if (e2 < dx) {
-                    err += dx
-                    y0 += sy
-                }
-            }
-            return true
         }
 
 

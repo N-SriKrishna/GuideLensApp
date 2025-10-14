@@ -1,12 +1,14 @@
+@file:Suppress("DEPRECATION")
+
 plugins {
-    id("com.android.application")
-    id("org.jetbrains.kotlin.android")
-    id("org.jetbrains.kotlin.plugin.compose")  // Apply WITHOUT version number
+    id("com.android.application") version "8.13.0"
+    id("org.jetbrains.kotlin.android") version "2.2.20"
+    id("org.jetbrains.kotlin.plugin.compose") version "2.2.20"
 }
 
 android {
     namespace = "com.example.guidelensapp"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.example.guidelensapp"
@@ -30,19 +32,13 @@ android {
             )
         }
     }
+
     applicationVariants.all {
         outputs.all {
             val output = this as com.android.build.gradle.internal.api.BaseVariantOutputImpl
             val versionName = defaultConfig.versionName
-            val versionCode = defaultConfig.versionCode
             val buildType = buildType.name
-
-            // Custom APK name: GuideLens-v1.0-release.apk
             output.outputFileName = "GuideLens-v${versionName}-${buildType}.apk"
-
-            // Alternative with version code and date:
-            // val date = SimpleDateFormat("yyyyMMdd").format(Date())
-            // output.outputFileName = "GuideLens-${versionCode}-${date}-${buildType}.apk"
         }
     }
 
@@ -66,41 +62,39 @@ android {
     }
 }
 
+composeCompiler {
+    enableStrongSkippingMode = true
+}
 
-// OPTIONAL: Compose Compiler Configuration
-        composeCompiler {
-            enableStrongSkippingMode = true
-        }
+dependencies {
+    // Core
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.androidx.activity.compose)
 
-        dependencies {
-            // Core
-            implementation("androidx.core:core-ktx:1.12.0")
-            implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
-            implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
-            implementation("androidx.activity:activity-compose:1.8.2")
+    // Compose BOM & Libraries
+    val composeBom = platform("androidx.compose:compose-bom:2025.10.00")
+    implementation(composeBom)
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-graphics")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-extended")
+    debugImplementation("androidx.compose.ui:ui-tooling")
 
-            // Compose
-            val composeBom = platform("androidx.compose:compose-bom:2024.02.00")
-            implementation(composeBom)
-            implementation("androidx.compose.ui:ui")
-            implementation("androidx.compose.ui:ui-graphics")
-            implementation("androidx.compose.ui:ui-tooling-preview")
-            implementation("androidx.compose.material3:material3")
-            debugImplementation("androidx.compose.ui:ui-tooling")
+    // CameraX
+    implementation(libs.androidx.camera.core)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
 
-            // CameraX
-            implementation("androidx.camera:camera-core:1.3.1")
-            implementation("androidx.camera:camera-camera2:1.3.1")
-            implementation("androidx.camera:camera-lifecycle:1.3.1")
-            implementation("androidx.camera:camera-view:1.3.1")
+    // ONNX Runtime
+    implementation(libs.onnx.runtime.android)
 
-            // ONNX Runtime
-            implementation("com.microsoft.onnxruntime:onnxruntime-android:1.17.0")
+    // Permissions
+    implementation(libs.accompanist.permissions)
 
-            // Permissions
-            implementation("com.google.accompanist:accompanist-permissions:0.34.0")
-
-            // Coroutines
-            implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
-        }
-
+    // Coroutines
+    implementation(libs.kotlinx.coroutines.android)
+}
