@@ -34,8 +34,8 @@ This project demonstrates the power of **TensorFlow Lite** and **ONNX Runtime** 
 | **Platform**           | Android (API 24+)                                         |
 | **Language**           | Kotlin (primary)                                          |
 | **UI Framework**       | Jetpack Compose                                           |
-| **ML Frameworks**      | TensorFlow Lite & ONNX Runtime                            |
-| **Object Detection**   | YOLO World v2 (.tflite)                                   |
+| **ML Frameworks**      | ONNX Runtime                                              |
+| **Object Detection**   | YOLO World v2 (.onnx) via ONNX Runtime Android            |
 | **Floor Segmentation** | PP-LiteSeg INT8 (.onnx) via ONNX Runtime Android          |
 | **Image Processing**   | Android Graphics & Custom Kotlin                          |
 | **Pathfinding**        | Custom A* & Pure Pursuit implementation in Kotlin         |
@@ -51,7 +51,7 @@ The app uses two different ML runtimes optimized for their respective tasks.
 
 ### 🧠 Object Detection Model (YOLO World v2)
 **Pipeline:**  
-`PyTorch → ONNX → TensorFlow SavedModel → TensorFlow Lite (.tflite)`
+`PyTorch → ONNX → TensorFlow SavedModel → Quantized ONNX (INT8)`
 
 ### 🌐 Floor Segmentation Model (PP-LiteSeg)
 **Pipeline:**  
@@ -72,9 +72,6 @@ The app uses two different ML runtimes optimized for their respective tasks.
    - Native INT8 acceleration support  
    - Optimized mobile execution providers  
    - Better performance for quantized models compared to TFLite  
-
-3. **Hybrid Approach**  
-   Using both TensorFlow Lite (for YOLO) and ONNX Runtime (for PP-LiteSeg) allows leveraging the best runtime for each model type.
 
 ---
 
