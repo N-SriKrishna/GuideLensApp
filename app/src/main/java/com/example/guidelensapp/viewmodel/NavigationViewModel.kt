@@ -2,18 +2,13 @@ package com.example.guidelensapp.viewmodel
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Color
 import android.graphics.PointF
 import android.util.Log
-import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.guidelensapp.Config
 import com.example.guidelensapp.ml.ObjectDetector
 import com.example.guidelensapp.ml.FloorSegmenter
-import com.example.guidelensapp.ml.DetectionResult
 import com.example.guidelensapp.navigation.NavigationOutput
 import com.example.guidelensapp.navigation.PathPlanner
 import com.example.guidelensapp.utils.MemoryManager
@@ -23,68 +18,33 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
 
 class NavigationViewModel : ViewModel() {
     private val _uiState = MutableStateFlow(NavigationUiState())
     val uiState = _uiState.asStateFlow()
 
-    // Core components
     private var objectDetector: ObjectDetector? = null
     private var floorSegmenter: FloorSegmenter? = null
     private var pathPlanner: PathPlanner? = null
 
-    // Context reference for memory operations
     private var applicationContext: Context? = null
 
-    // Managers
     private val threadManager = ThreadManager.getInstance()
     private val memoryManager = MemoryManager.getInstance()
 
-    // Navigation timing
-    private var lastInstructionTime = 0L
-    private var targetPosition: PointF? = null
-
-    // Device detection
     private val isEmulator = android.os.Build.FINGERPRINT.contains("generic") ||
             android.os.Build.FINGERPRINT.contains("unknown") ||
             android.os.Build.MODEL.contains("Emulator")
 
-    // Frame throttling
-    private var lastProcessTime = 0L
-    private val MIN_FRAME_INTERVAL_MS = if (isEmulator) 1000L else 300L
-
-    // Processing state
-    private val isProcessing = AtomicBoolean(false)
-
-    // Segmentation caching
-    private var segmentationFrameCounter = 0
-    private val SEGMENT_EVERY_N_FRAMES = if (isEmulator) 100 else 10
-    private var cachedFloorMask: Bitmap? = null
-    private var lastSegmentationTime = 0L
-
-    // Performance tracking
-    private var frameCount = 0L
-    private var modelsWarmedUp = false
-
-    // Error handling
-    private var consecutiveErrors = 0
-    private val MAX_CONSECUTIVE_ERRORS = 5
-
-    // Target object tracking
-    private val _targetObject = MutableStateFlow("chair")
-    val targetObject = _targetObject.asStateFlow()
+    private val isProcessingFrame = AtomicBoolean(false)
 
     companion object {
         private const val TAG = "NavigationViewModel"
-        private const val SEGMENTATION_TIMEOUT_MS = 8000L
-        private const val DETECTION_TIMEOUT_MS = 3000L
     }
 
     fun initializeModels(context: Context) {
         if (objectDetector != null) return
 
-        // Store application context
         applicationContext = context.applicationContext
 
         viewModelScope.launch(threadManager.ioDispatcher) {
@@ -92,7 +52,6 @@ class NavigationViewModel : ViewModel() {
                 Log.d(TAG, "Initializing models... (isEmulator=$isEmulator)")
                 _uiState.update { it.copy(navigationCommand = "Loading models...") }
 
-                // Initialize models
                 objectDetector = ObjectDetector(context)
                 floorSegmenter = FloorSegmenter(context)
                 pathPlanner = PathPlanner()
@@ -100,17 +59,14 @@ class NavigationViewModel : ViewModel() {
                 Log.d(TAG, "Models initialized successfully")
                 _uiState.update { it.copy(navigationCommand = "Models loaded - Warming up...") }
 
-                // Wait for floor segmenter to warm up
                 var waitTime = 0
                 while (floorSegmenter?.isReady() == false && waitTime < 5000) {
                     delay(100)
                     waitTime += 100
                 }
 
-                modelsWarmedUp = true
                 _uiState.update { it.copy(navigationCommand = "Ready") }
                 Log.d(TAG, "Models ready for inference")
-
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to initialize models", e)
                 _uiState.update { it.copy(navigationCommand = "Initialization failed: ${e.message}") }
@@ -119,175 +75,78 @@ class NavigationViewModel : ViewModel() {
     }
 
     fun processFrame(bitmap: Bitmap) {
-        // Don't process until models are ready
-        if (!modelsWarmedUp) {
+        if (!isProcessingFrame.compareAndSet(false, true)) {
             return
         }
 
-        // Throttle frame processing
-        val currentTime = System.currentTimeMillis()
-        if (currentTime - lastProcessTime < MIN_FRAME_INTERVAL_MS) {
-            return
-        }
-
-        // Skip if still processing
-        if (!isProcessing.compareAndSet(false, true)) {
-            return
-        }
-
-        lastProcessTime = currentTime
-
-        val detector = objectDetector
-        val segmenter = floorSegmenter
-        val planner = pathPlanner
-
-        if (detector == null || segmenter == null || planner == null) {
-            Log.w(TAG, "Models not initialized yet")
-            isProcessing.set(false)
-            return
-        }
-
-        viewModelScope.launch(threadManager.imageProcessingDispatcher) {
+        viewModelScope.launch(threadManager.mlDispatcher) {
             try {
-                frameCount++
-                val frameStartTime = System.currentTimeMillis()
+                val targetObject = _uiState.value.targetObject
 
-                // Convert bitmap if needed
-                val rgbBitmap = if (bitmap.config != Bitmap.Config.ARGB_8888) {
-                    val converted = memoryManager.getBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
-                    Canvas(converted).drawBitmap(bitmap, 0f, 0f, null)
-                    converted
+                // OPTIMIZED: Only detect the selected target object
+                val detectionResults = objectDetector?.detectTargetObject(bitmap, targetObject) ?: emptyList()
+
+                // Find the best detection (highest confidence)
+                val targetDetection = detectionResults.maxByOrNull { it.confidence }
+
+                val targetPos = targetDetection?.let {
+                    PointF(
+                        it.boundingBox.centerX(),
+                        it.boundingBox.centerY()
+                    )
+                }
+
+                // Floor Segmentation (only if target is found)
+                val floorMask = if (targetPos != null) {
+                    floorSegmenter?.segmentFloor(bitmap)
                 } else {
-                    bitmap
+                    null
                 }
 
-                // Run detection
-                val detectionStartTime = System.currentTimeMillis()
-                val detectionResults = withTimeoutOrNull(DETECTION_TIMEOUT_MS) {
-                    detector.detect(rgbBitmap)
-                } ?: emptyList()
-
-                val detectionTime = System.currentTimeMillis() - detectionStartTime
-
-                if (!isActive) {
-                    if (rgbBitmap !== bitmap) memoryManager.recycleBitmap(rgbBitmap)
-                    return@launch
-                }
-
-                // Run floor segmentation conditionally
-                segmentationFrameCounter++
-                val shouldSegment = segmentationFrameCounter >= SEGMENT_EVERY_N_FRAMES || cachedFloorMask == null
-
-                val floorMask = if (shouldSegment) {
-                    val segmentationStartTime = System.currentTimeMillis()
-                    val mask = withTimeoutOrNull(SEGMENTATION_TIMEOUT_MS) {
-                        segmenter.segmentFloor(rgbBitmap)
-                    }
-
-                    val segmentationTime = System.currentTimeMillis() - segmentationStartTime
-                    Log.d(TAG, "Segmentation took ${segmentationTime}ms")
-
-                    if (mask != null) {
-                        consecutiveErrors = 0
-                        // Update cache
-                        cachedFloorMask?.let { memoryManager.recycleBitmap(it) }
-                        cachedFloorMask = mask.copy(mask.config ?: Bitmap.Config.ARGB_8888, false)
-                        segmentationFrameCounter = 0
-                        lastSegmentationTime = System.currentTimeMillis()
-                    } else {
-                        consecutiveErrors++
-                        Log.w(TAG, "Floor segmentation failed")
-                    }
-
-                    mask ?: cachedFloorMask
-                } else {
-                    cachedFloorMask
-                }
-
-                // Clean up converted bitmap
-                if (rgbBitmap !== bitmap) {
-                    memoryManager.recycleBitmap(rgbBitmap)
-                }
-
-                if (!isActive) return@launch
-
-                // Find target using dynamic object
-                targetPosition = findTarget(detectionResults)
-
-                val navOutput = if (floorMask != null) {
-                    planner.getNavigationCommand(
+                // Path Planning
+                val navOutput = if (floorMask != null && targetPos != null) {
+                    pathPlanner?.getNavigationCommand(
                         floorMask,
-                        targetPosition,
+                        targetPos,
                         bitmap.width,
                         bitmap.height
-                    )
+                    ) ?: NavigationOutput("Path planning error")
                 } else {
-                    NavigationOutput("Floor detection unavailable")
+                    if (detectionResults.isEmpty()) {
+                        NavigationOutput("Searching for $targetObject...")
+                    } else {
+                        NavigationOutput("$targetObject detected, calculating path...")
+                    }
                 }
 
-                val totalTime = System.currentTimeMillis() - frameStartTime
-
-                // Update UI state
+                // Update UI - only show target object detections
                 _uiState.update { currentState ->
-                    val instructionTime = System.currentTimeMillis()
-                    val newCommand = if (instructionTime - lastInstructionTime > Config.INSTRUCTION_LOCK_DURATION_MS) {
-                        lastInstructionTime = instructionTime
-                        when {
-                            consecutiveErrors >= MAX_CONSECUTIVE_ERRORS -> "System experiencing issues..."
-                            else -> navOutput.command
-                        }
-                    } else {
-                        currentState.navigationCommand
-                    }
-
                     currentState.copy(
                         cameraImage = bitmap.asImageBitmap(),
-                        detectedObjects = detectionResults,
                         floorMaskOverlay = floorMask?.asImageBitmap(),
+                        detectedObjects = detectionResults, // Only contains target object
+                        targetPosition = targetPos,
                         path = navOutput.path,
-                        navigationCommand = newCommand,
-                        targetPosition = targetPosition
+                        navigationCommand = navOutput.command
                     )
                 }
 
-                // Log performance periodically
-                if (frameCount % 30 == 0L) {
-                    Log.d(TAG, "Frame processing took ${totalTime}ms (detection: ${detectionTime}ms)")
+                // Log target detection status
+                if (targetDetection != null) {
+                    Log.d(TAG, "✓ $targetObject detected: ${(targetDetection.confidence * 100).toInt()}%")
                 }
 
             } catch (e: Exception) {
-                Log.e(TAG, "Error in frame processing", e)
-                consecutiveErrors++
-                _uiState.update { currentState ->
-                    currentState.copy(navigationCommand = "Processing error")
-                }
+                Log.e(TAG, "Frame processing error", e)
             } finally {
-                isProcessing.set(false)
+                isProcessingFrame.set(false)
             }
         }
     }
 
-    private fun findTarget(detections: List<DetectionResult>): PointF? {
-        val currentTarget = _targetObject.value
-        val targetDetection = detections
-            .filter { it.label.equals(currentTarget, ignoreCase = true) }
-            .maxByOrNull { it.confidence }
-
-        return targetDetection?.let {
-            PointF(
-                it.boundingBox.centerX(),
-                it.boundingBox.centerY()
-            )
-        }
-    }
-
     fun setTargetObject(objectLabel: String) {
-        _targetObject.value = objectLabel.lowercase().trim()
         _uiState.update { it.copy(targetObject = objectLabel.lowercase().trim()) }
-        Log.d(TAG, "Target object changed to: ${_targetObject.value}")
-
-        // Reset target position when changing objects
-        targetPosition = null
+        Log.d(TAG, "Target object changed to: ${objectLabel.lowercase().trim()}")
         _uiState.update { it.copy(targetPosition = null, path = null) }
     }
 
@@ -305,18 +164,8 @@ class NavigationViewModel : ViewModel() {
 
     fun onLowMemory() {
         Log.w(TAG, "Low memory warning received")
-        // Force cleanup
         floorSegmenter?.forceCleanup()
-
-        // Clear cached floor mask
-        cachedFloorMask?.let {
-            memoryManager.recycleBitmap(it)
-            cachedFloorMask = null
-        }
-
-        // Force GC
-        System.gc()
-
+        memoryManager.forceGarbageCollection()
         _uiState.update { it.copy(navigationCommand = "Reducing quality due to memory pressure") }
     }
 
@@ -328,32 +177,19 @@ class NavigationViewModel : ViewModel() {
     override fun onCleared() {
         super.onCleared()
         Log.d(TAG, "Cleaning up NavigationViewModel...")
-
-        // Stop processing
-        isProcessing.set(true)
+        isProcessingFrame.set(true)
 
         try {
-            // Cancel all coroutines
             viewModelScope.cancel()
-
-            // Clean up models
             objectDetector?.close()
             floorSegmenter?.close()
 
-            // Clean up cached resources
-            cachedFloorMask?.let {
-                memoryManager.recycleBitmap(it)
-            }
-
-            // Null out references
             objectDetector = null
             floorSegmenter = null
             pathPlanner = null
-            cachedFloorMask = null
             applicationContext = null
 
             Log.d(TAG, "NavigationViewModel cleaned up successfully")
-
         } catch (e: Exception) {
             Log.e(TAG, "Error during cleanup", e)
         }

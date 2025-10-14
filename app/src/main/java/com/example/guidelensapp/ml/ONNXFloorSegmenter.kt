@@ -23,8 +23,7 @@ class ONNXFloorSegmenter(
     private val useQuantized: Boolean = true
 ) {
     private val TAG = "ONNXFloorSegmenter"
-    private val MODEL_NAME =
-        if (useQuantized) "floor_segmentation_int8.onnx" else "floor_segmentation.onnx"
+    private val MODEL_NAME ="floor_segmentation_int8.onnx"
 
     private var session: OrtSession? = null
     private var env: OrtEnvironment? = null
