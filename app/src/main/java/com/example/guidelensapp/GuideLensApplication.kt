@@ -8,17 +8,15 @@ import com.example.guidelensapp.utils.MemoryManager
 import com.example.guidelensapp.utils.ThreadManager
 
 class GuideLensApplication : Application() {
-
     companion object {
         private const val TAG = "GuideLensApplication"
     }
 
     override fun onCreate() {
         super.onCreate()
-
         Log.d(TAG, "Initializing GuideLens application")
 
-        // Initialize global managers early
+        // Initialize global managers
         try {
             ThreadManager.getInstance()
             MemoryManager.getInstance()
@@ -27,31 +25,24 @@ class GuideLensApplication : Application() {
             Log.e(TAG, "Failed to initialize global managers", e)
         }
 
-        // Set up uncaught exception handler for debugging
+        // Enhanced crash handler
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
-            Log.e(TAG, "Uncaught exception in thread ${thread.name}", throwable)
-            // You can add crash reporting here
-            System.exit(1)
-        }
-    }
+            Log.e(TAG, "═══════════════════════════════════════")
+            Log.e(TAG, "FATAL CRASH in thread: ${thread.name}")
+            Log.e(TAG, "Exception: ${throwable.javaClass.simpleName}")
+            Log.e(TAG, "Message: ${throwable.message}")
+            Log.e(TAG, "Stack trace:", throwable)
+            Log.e(TAG, "═══════════════════════════════════════")
 
-    override fun onLowMemory() {
-        super.onLowMemory()
-        Log.w(TAG, "Application low memory warning")
+            // Force cleanup
+            try {
+                MemoryManager.getInstance().forceGarbageCollection()
+            } catch (e: Exception) {
+                // Ignore
+            }
 
-        // Force cleanup across the app
-        MemoryManager.getInstance().performGcIfNeeded(this)
-    }
-
-    override fun onTerminate() {
-        super.onTerminate()
-        Log.d(TAG, "Application terminating")
-
-        // Shutdown thread pools
-        try {
-            ThreadManager.getInstance().shutdown()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error during shutdown", e)
+            android.os.Process.killProcess(android.os.Process.myPid())
+            System.exit(10)
         }
     }
 }

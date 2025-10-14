@@ -5,7 +5,6 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
@@ -35,9 +34,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             GuideLensAppTheme {
                 val permissionsState = rememberMultiplePermissionsState(
-                    permissions = listOf(
-                        Manifest.permission.CAMERA
-                    )
+                    permissions = listOf(Manifest.permission.CAMERA)
                 )
 
                 LaunchedEffect(Unit) {
@@ -64,12 +61,15 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        // Camera feed (hidden, just processes frames)
-        CameraView(onFrame = { bitmap ->
-            viewModel.processFrame(bitmap)
-        })
+        // ONLY ONE camera/image layer - showing processed frames with overlays
+        // Camera is hidden - just processes frames
+        Box(modifier = Modifier.size(0.dp)) {
+            CameraView(onFrame = { bitmap ->
+                viewModel.processFrame(bitmap)
+            })
+        }
 
-        // Overlay canvas (shows camera, floor mask, detections, path)
+        // Display processed image with all overlays
         OverlayCanvas(uiState = uiState)
 
         // Object selector dialog
@@ -85,7 +85,7 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
             )
         }
 
-        // Settings button (top-right)
+        // Settings button
         IconButton(
             onClick = { viewModel.toggleObjectSelector() },
             modifier = Modifier
@@ -107,7 +107,7 @@ fun PermissionDeniedScreen() {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black),
+            .systemBarsPadding(),
         contentAlignment = Alignment.Center
     ) {
         Text(

@@ -2,7 +2,6 @@ package com.example.guidelensapp.ui.composables
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Surface
@@ -26,34 +25,31 @@ import com.example.guidelensapp.viewmodel.NavigationUiState
 @Composable
 fun OverlayCanvas(uiState: NavigationUiState) {
     Box(modifier = Modifier.fillMaxSize()) {
-        // 1. Camera Image (base layer)
+        // 1. Camera Image
         uiState.cameraImage?.let { cameraImage ->
             Image(
                 bitmap = cameraImage,
                 contentDescription = "Camera feed",
                 modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop
+                contentScale = ContentScale.Crop  // CHANGED from Fit to Crop
             )
         }
 
-        // 2. Floor Mask Overlay (semi-transparent green)
+        // 2. Floor Mask Overlay - FIXED with proper scaling
         uiState.floorMaskOverlay?.let { floorMask ->
             Image(
                 bitmap = floorMask,
                 contentDescription = "Floor segmentation",
                 modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop,
-                colorFilter = ColorFilter.tint(
-                    color = Color(0x8000FF00), // 50% transparent green
-                    blendMode = BlendMode.Modulate
-                )
+                contentScale = ContentScale.Crop,  // CHANGED from Fit to Crop
+                alpha = 0.6f
             )
         }
 
-        // 3. Detections and Path (Canvas overlay)
+        // 3. Detections and Path
         NavigationOverlay(uiState = uiState)
 
-        // 4. Navigation command display
+        // 4. Navigation command
         Surface(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -76,40 +72,41 @@ fun OverlayCanvas(uiState: NavigationUiState) {
 @Composable
 fun NavigationOverlay(uiState: NavigationUiState) {
     Canvas(modifier = Modifier.fillMaxSize()) {
-        // Get canvas dimensions
         val canvasWidth = size.width
         val canvasHeight = size.height
 
-        // Calculate scale factors based on camera image dimensions
-        val scaleX = if (uiState.cameraImage != null) {
-            canvasWidth / uiState.cameraImage.width.toFloat()
-        } else 1f
+        // FIXED: Use proper aspect ratio calculations
+        val imageWidth = uiState.cameraImage?.width?.toFloat() ?: canvasWidth
+        val imageHeight = uiState.cameraImage?.height?.toFloat() ?: canvasHeight
 
-        val scaleY = if (uiState.cameraImage != null) {
-            canvasHeight / uiState.cameraImage.height.toFloat()
-        } else 1f
+        val scaleX = canvasWidth / imageWidth
+        val scaleY = canvasHeight / imageHeight
+        val scale = minOf(scaleX, scaleY)
 
-        // Draw only target object detections with proper scaling
+        val scaledWidth = imageWidth * scale
+        val scaledHeight = imageHeight * scale
+        val offsetX = (canvasWidth - scaledWidth) / 2f
+        val offsetY = (canvasHeight - scaledHeight) / 2f
+
+        // Draw detections
         uiState.detectedObjects.forEach { detection ->
             val rect = detection.boundingBox
+            val targetColor = Color(0xFF4CAF50)
 
-            // Scale bounding box coordinates to canvas size
-            val scaledLeft = rect.left * scaleX
-            val scaledTop = rect.top * scaleY
-            val scaledWidth = rect.width() * scaleX
-            val scaledHeight = rect.height() * scaleY
+            val left = rect.left * scale + offsetX
+            val top = rect.top * scale + offsetY
+            val width = rect.width() * scale
+            val height = rect.height() * scale
 
-            val targetColor = Color(0xFF4CAF50) // Bright green
-
-            // Draw bounding box with scaled coordinates
+            // Draw bounding box
             drawRect(
                 color = targetColor,
-                topLeft = Offset(scaledLeft, scaledTop),
-                size = Size(scaledWidth, scaledHeight),
+                topLeft = Offset(left, top),
+                size = Size(width, height),
                 style = Stroke(width = 8f)
             )
 
-            // Draw label with scaled position
+            // Draw label
             val labelText = "${detection.label} ${(detection.confidence * 100).toInt()}%"
             val textPaint = android.graphics.Paint().apply {
                 color = android.graphics.Color.WHITE
@@ -122,58 +119,57 @@ fun NavigationOverlay(uiState: NavigationUiState) {
                 val textBounds = android.graphics.Rect()
                 textPaint.getTextBounds(labelText, 0, labelText.length, textBounds)
 
-                // Label background with scaled position
                 drawRect(
-                    scaledLeft,
-                    scaledTop - textBounds.height() - 20f,
-                    scaledLeft + textBounds.width() + 20f,
-                    scaledTop,
+                    left,
+                    top - textBounds.height() - 20f,
+                    left + textBounds.width() + 20f,
+                    top,
                     android.graphics.Paint().apply {
                         color = android.graphics.Color.parseColor("#4CAF50")
                         style = android.graphics.Paint.Style.FILL
                     }
                 )
 
-                // Label text with scaled position
-                drawText(
-                    labelText,
-                    scaledLeft + 10f,
-                    scaledTop - 10f,
-                    textPaint
-                )
+                drawText(labelText, left + 10f, top - 10f, textPaint)
             }
         }
 
-        // Draw path if available with scaling
-        uiState.path?.let { pathPoints ->
+        // Draw path - FIXED Use pathPoints
+        uiState.pathPoints?.let { pathPoints ->
             if (pathPoints.size > 1) {
                 for (i in 0 until pathPoints.size - 1) {
                     drawLine(
                         color = Color.Cyan,
-                        start = Offset(pathPoints[i].x * scaleX, pathPoints[i].y * scaleY),
-                        end = Offset(pathPoints[i + 1].x * scaleX, pathPoints[i + 1].y * scaleY),
+                        start = Offset(
+                            pathPoints[i].x * scale + offsetX,
+                            pathPoints[i].y * scale + offsetY
+                        ),
+                        end = Offset(
+                            pathPoints[i + 1].x * scale + offsetX,
+                            pathPoints[i + 1].y * scale + offsetY
+                        ),
                         strokeWidth = 6f
                     )
                 }
             }
         }
 
-        // Draw target position marker with scaling
+        // Draw target marker
         uiState.targetPosition?.let { target ->
-            val scaledTargetX = target.x * scaleX
-            val scaledTargetY = target.y * scaleY
+            val targetX = target.x * scale + offsetX
+            val targetY = target.y * scale + offsetY
 
-            // Draw crosshair at target
+            // Crosshair
             drawLine(
                 color = Color.Red,
-                start = Offset(scaledTargetX - 30f, scaledTargetY),
-                end = Offset(scaledTargetX + 30f, scaledTargetY),
+                start = Offset(targetX - 30f, targetY),
+                end = Offset(targetX + 30f, targetY),
                 strokeWidth = 5f
             )
             drawLine(
                 color = Color.Red,
-                start = Offset(scaledTargetX, scaledTargetY - 30f),
-                end = Offset(scaledTargetX, scaledTargetY + 30f),
+                start = Offset(targetX, targetY - 30f),
+                end = Offset(targetX, targetY + 30f),
                 strokeWidth = 5f
             )
         }

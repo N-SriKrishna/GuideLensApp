@@ -5,6 +5,8 @@ import android.graphics.Bitmap
 import android.graphics.RectF
 import android.util.Log
 import ai.onnxruntime.*
+import android.content.ContentValues.TAG
+import com.example.guidelensapp.Config
 import java.nio.FloatBuffer
 import kotlin.math.max
 import kotlin.math.min
@@ -12,11 +14,10 @@ import kotlin.math.min
 class ObjectDetector(private val context: Context) {
     private var session: OrtSession? = null
     private val env = OrtEnvironment.getEnvironment()
-    private val inputSize = 640
-    private val confidenceThreshold = 0.30f
-    private val iouThreshold = 0.45f
+    private val inputSize = Config.MODEL_INPUT_SIZE
+    private val confidenceThreshold = Config.DETECTION_CONFIDENCE_THRESHOLD
+    private val iouThreshold = Config.DETECTION_IOU_THRESHOLD
 
-    // COCO class names with index mapping
     private val labels = listOf(
         "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
         "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat",
@@ -43,37 +44,77 @@ class ObjectDetector(private val context: Context) {
         try {
             val modelName = "yolov8s-worldv2_int8.onnx"
             val modelBytes = context.assets.open(modelName).readBytes()
+
             val sessionOptions = OrtSession.SessionOptions().apply {
-                try {
-                    addNnapi()
-                    Log.d(TAG, "✓ NNAPI enabled")
-                } catch (e: Exception) {
-                    Log.w(TAG, "NNAPI not available, using CPU")
+                // VALID ONNX Runtime 1.17.0 API calls only
+
+                // 1. NNAPI (Neural Networks API) - Uses Snapdragon NPU
+                if (Config.USE_NNAPI) {
+                    try {
+                        addNnapi()
+                        Log.d(TAG, "✅ NNAPI enabled (Snapdragon NPU)")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "⚠️ NNAPI not available: ${e.message}")
+                    }
                 }
 
-                setIntraOpNumThreads(4)
+                // 2. Thread optimization for Snapdragon 8 Gen 2
+                setIntraOpNumThreads(Config.ML_INFERENCE_THREADS)
+                setInterOpNumThreads(2)
+
+                // 3. Optimization level (VALID method)
                 setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+
+                // REMOVED: These methods don't exist in ONNX Runtime 1.17.0
+                // setGraphOptimizationLevel()
+                // setMemoryPatternOptimization()
+                // setCpuMemArena()
             }
 
             session = env.createSession(modelBytes, sessionOptions)
-            Log.d(TAG, "✅ ONNX model loaded: $modelName")
+
+            // Log model info
+            val inputInfo = session?.inputInfo?.entries?.firstOrNull()
+            Log.d(TAG, "✅ Model loaded: $modelName")
+            Log.d(TAG, "   Input: ${inputInfo?.key}")
+            Log.d(TAG, "   Optimizations: NNAPI=${Config.USE_NNAPI}, Threads=${Config.ML_INFERENCE_THREADS}")
+
         } catch (e: Exception) {
             Log.e(TAG, "❌ Failed to load model: ${e.message}", e)
             throw RuntimeException("Failed to load ONNX model: ${e.message}")
         }
     }
 
-    /**
-     * Detect only the specified target object
-     */
     fun detectTargetObject(bitmap: Bitmap, targetObject: String): List<DetectionResult> {
         return detectObjects(bitmap, listOf(targetObject))
     }
 
-    /**
-     * Detect objects with optional filtering
-     */
     fun detectObjects(bitmap: Bitmap, filterClasses: List<String> = emptyList()): List<DetectionResult> {
+        // CRASH PROTECTION
+        if (session == null) {
+            Log.e(TAG, "❌ Session is null, model not loaded")
+            return emptyList()
+        }
+
+        val startTime = System.currentTimeMillis()
+
+        return try {
+            detectObjectsInternal(bitmap, filterClasses)
+        } catch (e: OutOfMemoryError) {
+            Log.e(TAG, "❌ Out of memory during detection", e)
+            System.gc()
+            emptyList()
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Detection crashed", e)
+            emptyList()
+        }
+    }
+
+    private fun detectObjectsInternal(bitmap: Bitmap, filterClasses: List<String>): List<DetectionResult> {
+        // ... rest of your existing detectObjects code ...
+
+        val startTime = System.currentTimeMillis()
+
         try {
             imageWidth = bitmap.width
             imageHeight = bitmap.height
@@ -91,8 +132,15 @@ class ObjectDetector(private val context: Context) {
                 return emptyList()
             }
 
-            val inputTensor = preprocessImage(bitmap)
+            // Preprocessing
+            val prepStart = System.currentTimeMillis()
+            val inputTensor = preprocessImageOptimized(bitmap)
+            val prepTime = System.currentTimeMillis() - prepStart
+
+            // Inference
+            val inferStart = System.currentTimeMillis()
             val outputs = session?.run(mapOf("images" to inputTensor))
+            val inferTime = System.currentTimeMillis() - inferStart
 
             if (outputs == null || outputs.size() == 0) {
                 Log.e(TAG, "❌ No outputs from model")
@@ -100,19 +148,19 @@ class ObjectDetector(private val context: Context) {
                 return emptyList()
             }
 
+            // Post-processing
+            val postStart = System.currentTimeMillis()
             val outputValue = outputs[0].value
             val detections = when (outputValue) {
                 is Array<*> -> {
                     when (val firstElement = outputValue[0]) {
                         is Array<*> -> {
                             @Suppress("UNCHECKED_CAST")
-                            val output2D = firstElement as Array<FloatArray>
-                            postProcess(output2D, targetIndices)
+                            postProcess(firstElement as Array<FloatArray>, targetIndices)
                         }
                         is FloatArray -> {
                             @Suppress("UNCHECKED_CAST")
-                            val output2D = outputValue as Array<FloatArray>
-                            postProcess(output2D, targetIndices)
+                            postProcess(outputValue as Array<FloatArray>, targetIndices)
                         }
                         else -> emptyList()
                     }
@@ -131,36 +179,43 @@ class ObjectDetector(private val context: Context) {
                 }
                 else -> emptyList()
             }
+            val postTime = System.currentTimeMillis() - postStart
 
             inputTensor.close()
             outputs.close()
 
+            val totalTime = System.currentTimeMillis() - startTime
+            Log.d(TAG, "⚡ Detection: ${totalTime}ms (prep:${prepTime}ms, infer:${inferTime}ms, post:${postTime}ms) -> ${detections.size} objects")
+
             return detections
+
         } catch (e: Exception) {
             Log.e(TAG, "❌ Detection error: ${e.message}", e)
             return emptyList()
         }
     }
 
-    private fun preprocessImage(bitmap: Bitmap): OnnxTensor {
-        val resizedBitmap = Bitmap.createScaledBitmap(bitmap, inputSize, inputSize, true)
+    private fun preprocessImageOptimized(bitmap: Bitmap): OnnxTensor {
+        val resizedBitmap = Bitmap.createScaledBitmap(
+            bitmap,
+            inputSize,
+            inputSize,
+            true
+        )
+
         val floatArray = FloatArray(1 * 3 * inputSize * inputSize)
         val pixels = IntArray(inputSize * inputSize)
         resizedBitmap.getPixels(pixels, 0, inputSize, 0, 0, inputSize, inputSize)
 
-        var idx = 0
-        for (c in 0..2) {
-            for (y in 0 until inputSize) {
-                for (x in 0 until inputSize) {
-                    val pixel = pixels[y * inputSize + x]
-                    val value = when(c) {
-                        0 -> ((pixel shr 16) and 0xFF) / 255.0f
-                        1 -> ((pixel shr 8) and 0xFF) / 255.0f
-                        else -> (pixel and 0xFF) / 255.0f
-                    }
-                    floatArray[idx++] = value
-                }
-            }
+        // Optimized single-pass RGB extraction
+        var idxR = 0
+        var idxG = inputSize * inputSize
+        var idxB = inputSize * inputSize * 2
+
+        for (pixel in pixels) {
+            floatArray[idxR++] = ((pixel shr 16) and 0xFF) * 0.003921569f
+            floatArray[idxG++] = ((pixel shr 8) and 0xFF) * 0.003921569f
+            floatArray[idxB++] = (pixel and 0xFF) * 0.003921569f
         }
 
         resizedBitmap.recycle()
@@ -221,7 +276,6 @@ class ObjectDetector(private val context: Context) {
                     }
                 }
             } else {
-                // ONLY CHECK TARGET CLASSES
                 for (idx in targetIndices) {
                     if (idx < scores.size && scores[idx] > maxScore) {
                         maxScore = scores[idx]
@@ -291,7 +345,7 @@ class ObjectDetector(private val context: Context) {
             }
         }
 
-        return finalDetections
+        return finalDetections.take(Config.MAX_DETECTIONS_PER_FRAME)
     }
 
     private fun calculateIoU(box1: RectF, box2: RectF): Float {
@@ -310,6 +364,7 @@ class ObjectDetector(private val context: Context) {
 
     fun close() {
         session?.close()
+        Log.d(TAG, "ObjectDetector closed")
     }
 
     companion object {

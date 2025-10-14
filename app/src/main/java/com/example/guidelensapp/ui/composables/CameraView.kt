@@ -1,7 +1,6 @@
 package com.example.guidelensapp.ui.composables
 
 import android.graphics.Bitmap
-import android.graphics.ImageFormat
 import android.graphics.Matrix
 import android.util.Log
 import androidx.camera.core.CameraSelector
@@ -12,6 +11,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -25,10 +25,19 @@ fun CameraView(onFrame: (Bitmap) -> Unit) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
 
+    DisposableEffect(Unit) {
+        onDispose {
+            cameraExecutor.shutdown()
+        }
+    }
+
     AndroidView(
         modifier = Modifier.fillMaxSize(),
         factory = { ctx ->
-            val previewView = PreviewView(ctx)
+            val previewView = PreviewView(ctx).apply {
+                scaleType = PreviewView.ScaleType.FILL_CENTER
+            }
+
             val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
 
             cameraProviderFuture.addListener({
@@ -40,13 +49,12 @@ fun CameraView(onFrame: (Bitmap) -> Unit) {
                         it.setSurfaceProvider(previewView.surfaceProvider)
                     }
 
-                // FIXED: Use RGBA format like the working app
                 val imageAnalyzer = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)  // KEY CHANGE
+                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                     .build()
-                    .also {
-                        it.setAnalyzer(cameraExecutor) { imageProxy ->
+                    .also { analysis ->
+                        analysis.setAnalyzer(cameraExecutor) { imageProxy ->
                             processImageProxy(imageProxy, onFrame)
                         }
                     }
@@ -62,7 +70,7 @@ fun CameraView(onFrame: (Bitmap) -> Unit) {
                         imageAnalyzer
                     )
                 } catch (e: Exception) {
-                    Log.e("CameraView", "Camera binding failed", e)
+                    Log.e(TAG, "Camera binding failed", e)
                 }
             }, context.mainExecutor)
 
@@ -71,14 +79,25 @@ fun CameraView(onFrame: (Bitmap) -> Unit) {
     )
 }
 
-// IMPROVED: Direct RGBA to Bitmap conversion
 private fun processImageProxy(imageProxy: ImageProxy, onFrame: (Bitmap) -> Unit) {
     try {
+        // Get rotation degrees from image metadata
+        val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+
+        // Convert to bitmap
         val bitmap = imageProxyToBitmap(imageProxy)
-        val rotatedBitmap = rotateBitmap(bitmap, imageProxy.imageInfo.rotationDegrees.toFloat())
+
+        // Rotate bitmap to match preview orientation
+        val rotatedBitmap = if (rotationDegrees != 0) {
+            rotateBitmap(bitmap, rotationDegrees.toFloat())
+        } else {
+            bitmap
+        }
+
         onFrame(rotatedBitmap)
+
     } catch (e: Exception) {
-        Log.e("CameraView", "Error processing frame", e)
+        Log.e(TAG, "Error processing frame", e)
     } finally {
         imageProxy.close()
     }
@@ -100,14 +119,33 @@ private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap {
     bitmap.copyPixelsFromBuffer(buffer)
 
     return if (rowPadding > 0) {
-        Bitmap.createBitmap(bitmap, 0, 0, imageProxy.width, imageProxy.height)
+        Bitmap.createBitmap(bitmap, 0, 0, imageProxy.width, imageProxy.height).also {
+            bitmap.recycle()
+        }
     } else {
         bitmap
     }
 }
 
 private fun rotateBitmap(bitmap: Bitmap, degrees: Float): Bitmap {
-    if (degrees == 0f) return bitmap
-    val matrix = Matrix().apply { postRotate(degrees) }
-    return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+    val matrix = Matrix().apply {
+        postRotate(degrees)
+    }
+
+    return Bitmap.createBitmap(
+        bitmap,
+        0,
+        0,
+        bitmap.width,
+        bitmap.height,
+        matrix,
+        true
+    ).also {
+        // Recycle original bitmap after rotation
+        if (it != bitmap) {
+            bitmap.recycle()
+        }
+    }
 }
+
+private const val TAG = "CameraView"

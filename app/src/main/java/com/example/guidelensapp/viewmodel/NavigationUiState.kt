@@ -14,5 +14,6 @@ data class NavigationUiState(
     val path: List<PointF>? = null,
     val navigationCommand: String = "Initializing...",
     val isNavigating: Boolean = false,
-    val showObjectSelector: Boolean = true // Show selector at start
+    val showObjectSelector: Boolean = true, // Show selector at start
+    val pathPoints: List<PointF>? = null
 )
