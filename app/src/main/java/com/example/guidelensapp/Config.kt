@@ -130,4 +130,16 @@ object Config {
             FP16: $ENABLE_FP16
         """.trimIndent()
     }
+    // ===== Text-to-Speech Settings =====
+    const val TTS_SPEECH_RATE = 0.9f
+    const val TTS_PITCH = 1.0f
+    const val TTS_ANNOUNCEMENT_INTERVAL_MS = 3000L // Minimum time between announcements
+
+    // TTS Priority levels
+    object TTSPriority {
+        const val EMERGENCY = 0     // Immediate, flush queue
+        const val NAVIGATION = 1    // High priority
+        const val DETECTION = 2     // Medium priority
+        const val INFO = 3          // Low priority
+    }
 }

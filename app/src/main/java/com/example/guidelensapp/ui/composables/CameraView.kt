@@ -15,7 +15,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.viewinterop.AndroidView
 import java.util.concurrent.Executors
 import androidx.core.graphics.createBitmap
@@ -23,7 +22,7 @@ import androidx.core.graphics.createBitmap
 @Composable
 fun CameraView(onFrame: (Bitmap) -> Unit) {
     val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
 
     DisposableEffect(Unit) {
@@ -40,10 +39,8 @@ fun CameraView(onFrame: (Bitmap) -> Unit) {
             }
 
             val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
-
             cameraProviderFuture.addListener({
                 val cameraProvider = cameraProviderFuture.get()
-
                 val preview = Preview.Builder()
                     .build()
                     .also {
@@ -61,7 +58,6 @@ fun CameraView(onFrame: (Bitmap) -> Unit) {
                     }
 
                 val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-
                 try {
                     cameraProvider.unbindAll()
                     cameraProvider.bindToLifecycle(
@@ -74,7 +70,6 @@ fun CameraView(onFrame: (Bitmap) -> Unit) {
                     Log.e(TAG, "Camera binding failed", e)
                 }
             }, context.mainExecutor)
-
             previewView
         }
     )
@@ -84,10 +79,8 @@ private fun processImageProxy(imageProxy: ImageProxy, onFrame: (Bitmap) -> Unit)
     try {
         // Get rotation degrees from image metadata
         val rotationDegrees = imageProxy.imageInfo.rotationDegrees
-
         // Convert to bitmap
         val bitmap = imageProxyToBitmap(imageProxy)
-
         // Rotate bitmap to match preview orientation
         val rotatedBitmap = if (rotationDegrees != 0) {
             rotateBitmap(bitmap, rotationDegrees.toFloat())
@@ -96,7 +89,6 @@ private fun processImageProxy(imageProxy: ImageProxy, onFrame: (Bitmap) -> Unit)
         }
 
         onFrame(rotatedBitmap)
-
     } catch (e: Exception) {
         Log.e(TAG, "Error processing frame", e)
     } finally {
@@ -110,11 +102,8 @@ private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap {
     val pixelStride = plane.pixelStride
     val rowStride = plane.rowStride
     val rowPadding = rowStride - pixelStride * imageProxy.width
-
     val bitmap = createBitmap(imageProxy.width + rowPadding / pixelStride, imageProxy.height)
-
     bitmap.copyPixelsFromBuffer(buffer)
-
     return if (rowPadding > 0) {
         Bitmap.createBitmap(bitmap, 0, 0, imageProxy.width, imageProxy.height).also {
             bitmap.recycle()

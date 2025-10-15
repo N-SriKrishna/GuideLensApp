@@ -30,17 +30,19 @@ fun OverlayCanvas(uiState: NavigationUiState) {
                 bitmap = cameraImage,
                 contentDescription = "Camera feed",
                 modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop  // CHANGED from Fit to Crop
+                contentScale = ContentScale.Crop,
+                alignment = Alignment.Center
             )
         }
 
-        // 2. Floor Mask Overlay - FIXED with proper scaling
+        // 2. Floor Mask Overlay
         uiState.floorMaskOverlay?.let { floorMask ->
             Image(
                 bitmap = floorMask,
                 contentDescription = "Floor segmentation",
                 modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop,  // CHANGED from Fit to Crop
+                contentScale = ContentScale.Crop,
+                alignment = Alignment.Center,
                 alpha = 0.6f
             )
         }
@@ -74,13 +76,15 @@ fun NavigationOverlay(uiState: NavigationUiState) {
         val canvasWidth = size.width
         val canvasHeight = size.height
 
-        // FIXED: Use proper aspect ratio calculations
+        // Calculate proper scaling for ContentScale.Crop behavior
         val imageWidth = uiState.cameraImage?.width?.toFloat() ?: canvasWidth
         val imageHeight = uiState.cameraImage?.height?.toFloat() ?: canvasHeight
 
         val scaleX = canvasWidth / imageWidth
         val scaleY = canvasHeight / imageHeight
-        val scale = minOf(scaleX, scaleY)
+
+        // Use max scale for Crop behavior (fills entire space)
+        val scale = maxOf(scaleX, scaleY)
 
         val scaledWidth = imageWidth * scale
         val scaledHeight = imageHeight * scale
@@ -91,7 +95,6 @@ fun NavigationOverlay(uiState: NavigationUiState) {
         uiState.detectedObjects.forEach { detection ->
             val rect = detection.boundingBox
             val targetColor = Color(0xFF4CAF50)
-
             val left = rect.left * scale + offsetX
             val top = rect.top * scale + offsetY
             val width = rect.width() * scale
@@ -117,7 +120,6 @@ fun NavigationOverlay(uiState: NavigationUiState) {
             drawContext.canvas.nativeCanvas.apply {
                 val textBounds = android.graphics.Rect()
                 textPaint.getTextBounds(labelText, 0, labelText.length, textBounds)
-
                 drawRect(
                     left,
                     top - textBounds.height() - 20f,
@@ -128,12 +130,11 @@ fun NavigationOverlay(uiState: NavigationUiState) {
                         style = android.graphics.Paint.Style.FILL
                     }
                 )
-
                 drawText(labelText, left + 10f, top - 10f, textPaint)
             }
         }
 
-        // Draw path - FIXED Use pathPoints
+        // Draw path
         uiState.pathPoints?.let { pathPoints ->
             if (pathPoints.size > 1) {
                 for (i in 0 until pathPoints.size - 1) {
@@ -165,6 +166,7 @@ fun NavigationOverlay(uiState: NavigationUiState) {
                 end = Offset(targetX + 30f, targetY),
                 strokeWidth = 5f
             )
+
             drawLine(
                 color = Color.Red,
                 start = Offset(targetX, targetY - 30f),

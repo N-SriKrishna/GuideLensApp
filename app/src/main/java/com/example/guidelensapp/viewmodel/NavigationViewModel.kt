@@ -8,6 +8,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.guidelensapp.Config
+import com.example.guidelensapp.accessibility.TextToSpeechManager
 import com.example.guidelensapp.ml.ObjectDetector
 import com.example.guidelensapp.ml.FloorSegmenter
 import com.example.guidelensapp.navigation.NavigationOutput
@@ -27,15 +28,18 @@ class NavigationViewModel : ViewModel() {
     private var objectDetector: ObjectDetector? = null
     private var floorSegmenter: FloorSegmenter? = null
     private var applicationContext: Context? = null
-
     private val threadManager = ThreadManager.getInstance()
-
     private val isProcessingFrame = AtomicBoolean(false)
     private val lastProcessedTime = AtomicLong(0L)
     private val isShuttingDown = AtomicBoolean(false)
-
     private var previousCameraImage: Bitmap? = null
     private var previousFloorMask: Bitmap? = null
+
+    private var ttsManager: TextToSpeechManager? = null
+    private var lastTTSAnnouncementTime = AtomicLong(0L)
+    private var lastAnnouncedCommand: String? = null
+    private var targetDetectedCount = 0
+    private var targetLostCount = 0
 
     companion object {
         private const val TAG = "NavigationViewModel"
@@ -43,8 +47,8 @@ class NavigationViewModel : ViewModel() {
 
     fun initializeModels(context: Context) {
         if (objectDetector != null) return
-
         applicationContext = context.applicationContext
+
         viewModelScope.launch(threadManager.ioDispatcher) {
             try {
                 Log.d(TAG, "🔧 Initializing models...")
@@ -53,10 +57,14 @@ class NavigationViewModel : ViewModel() {
                 objectDetector = ObjectDetector(context)
                 floorSegmenter = FloorSegmenter(context)
 
+                ttsManager = TextToSpeechManager(context)
+                ttsManager?.speechRate = Config.TTS_SPEECH_RATE
+                ttsManager?.pitch = Config.TTS_PITCH
+                Log.d(TAG, "NavigationViewModel initialized with TTS")
+
                 Log.d(TAG, "✅ Models initialized successfully")
                 _uiState.update { it.copy(navigationCommand = "Models loaded - Warming up...") }
 
-                // Wait for floor segmenter to be ready
                 var waitTime = 0
                 while (floorSegmenter?.isReady() == false && waitTime < 5000) {
                     delay(100)
@@ -65,7 +73,6 @@ class NavigationViewModel : ViewModel() {
 
                 _uiState.update { it.copy(navigationCommand = "Ready - Select target and start navigation") }
                 Log.d(TAG, "✅ Models ready for inference")
-
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Failed to initialize models", e)
                 _uiState.update { it.copy(navigationCommand = "Initialization failed: ${e.message}") }
@@ -90,12 +97,17 @@ class NavigationViewModel : ViewModel() {
                 val startTime = System.currentTimeMillis()
                 val targetObjectName = _uiState.value.targetObject
 
-                // STEP 1: Object Detection
+                // Make a COPY of the bitmap to prevent recycling issues
+                val bitmapCopy = bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, false)
+
+                // Object Detection
                 val detections = try {
                     if (_uiState.value.isNavigating && targetObjectName.isNotEmpty()) {
-                        objectDetector?.detectObjects(bitmap, listOf(targetObjectName)) ?: emptyList()
+                        objectDetector?.detectObjects(bitmapCopy, listOf(targetObjectName))
+                            ?: emptyList()
                     } else {
-                        objectDetector?.detectObjects(bitmap, Config.NAVIGABLE_OBJECTS) ?: emptyList()
+                        objectDetector?.detectObjects(bitmapCopy, Config.NAVIGABLE_OBJECTS)
+                            ?: emptyList()
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "❌ Object detection crashed", e)
@@ -110,11 +122,11 @@ class NavigationViewModel : ViewModel() {
                     PointF(it.boundingBox.centerX(), it.boundingBox.centerY())
                 }
 
-                // STEP 2: Floor Segmentation
+                // Floor Segmentation
                 val floorMask = if (_uiState.value.isNavigating) {
                     try {
                         Log.d(TAG, "🟢 Running floor segmentation...")
-                        floorSegmenter?.segmentFloor(bitmap)
+                        floorSegmenter?.segmentFloor(bitmapCopy)
                     } catch (e: Exception) {
                         Log.e(TAG, "❌ Floor segmentation crashed", e)
                         null
@@ -123,43 +135,62 @@ class NavigationViewModel : ViewModel() {
                     null
                 }
 
-                // STEP 3: Path Planning - CRITICAL FIX!
+                // Path Planning
                 val navigationOutput = when {
                     _uiState.value.isNavigating && floorMask != null && targetPos != null -> {
                         try {
-                            Log.d(TAG, "🧭 Running path planning to $targetObjectName at (${ targetPos.x},${targetPos.y})...")
+                            Log.d(
+                                TAG,
+                                "🧭 Running path planning to $targetObjectName at (${targetPos.x},${targetPos.y})..."
+                            )
                             val navResult = PathPlanner.getNavigationCommand(
                                 floorMask = floorMask,
                                 targetPosition = targetPos,
-                                imageWidth = bitmap.width,
-                                imageHeight = bitmap.height
+                                imageWidth = bitmapCopy.width,
+                                imageHeight = bitmapCopy.height
                             )
-                            Log.d(TAG, "📍 Path planning result: ${navResult.command}, path points: ${navResult.path?.size ?: 0}")
+                            Log.d(
+                                TAG,
+                                "📍 Path planning result: ${navResult.command}, path points: ${navResult.path?.size ?: 0}"
+                            )
+                            announceNavigationCommand(navResult.command)
                             navResult
                         } catch (e: Exception) {
                             Log.e(TAG, "❌ Path planning crashed", e)
                             NavigationOutput("Navigation error", null)
                         }
                     }
+
                     _uiState.value.isNavigating && floorMask == null && targetPos != null -> {
                         Log.d(TAG, "⏳ Waiting for floor mask...")
                         NavigationOutput("Analyzing floor...", null)
                     }
+
                     _uiState.value.isNavigating -> {
                         Log.d(TAG, "🔍 Searching for $targetObjectName...")
                         NavigationOutput("Searching for $targetObjectName...", null)
                     }
+
                     else -> null
                 }
 
                 val totalTime = System.currentTimeMillis() - startTime
                 val navCmd = navigationOutput?.command ?: "none"
-                Log.d(TAG, "✅ Frame processed in ${totalTime}ms - Target: ${targetObject?.label ?: "none"} ${targetObject?.confidence?.times(100)?.toInt() ?: 0}% - Nav: $navCmd")
+                Log.d(
+                    TAG,
+                    "✅ Frame processed in ${totalTime}ms - Target: ${targetObject?.label ?: "none"} ${
+                        targetObject?.confidence?.times(100)?.toInt() ?: 0
+                    }% - Nav: $navCmd"
+                )
 
-                // STEP 4: Update UI State
+                // Store old bitmaps to recycle AFTER UI update completes
+                val oldCameraImage = previousCameraImage
+                val oldFloorMask = previousFloorMask
+
+                // Update UI State with converted ImageBitmaps
                 _uiState.update { current ->
                     current.copy(
-                        cameraImage = bitmap.asImageBitmap(),
+                        cameraImage = bitmapCopy.asImageBitmap(),
                         detectedObjects = if (current.isNavigating) {
                             targetObject?.let { listOf(it) } ?: emptyList()
                         } else {
@@ -173,13 +204,26 @@ class NavigationViewModel : ViewModel() {
                     )
                 }
 
-                lastProcessedTime.set(currentTime)
-
-                previousCameraImage?.recycle()
-                previousFloorMask?.recycle()
-                previousCameraImage = bitmap
+                // Store new bitmaps for next iteration
+                previousCameraImage = bitmapCopy
                 previousFloorMask = floorMask
 
+                // Delay recycling old bitmaps to ensure Compose has finished rendering
+                delay(100) // Give Compose time to render
+
+                // Now safe to recycle old bitmaps
+                try {
+                    if (oldCameraImage?.isRecycled == false) {
+                        oldCameraImage.recycle()
+                    }
+                    if (oldFloorMask?.isRecycled == false) {
+                        oldFloorMask.recycle()
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error recycling old bitmaps", e)
+                }
+
+                lastProcessedTime.set(currentTime)
             } finally {
                 isProcessingFrame.set(false)
             }
@@ -187,8 +231,7 @@ class NavigationViewModel : ViewModel() {
     }
 
 
-
-
+    // UI Button Functions
 
     fun setTargetObject(objectLabel: String) {
         val normalizedLabel = objectLabel.lowercase().trim()
@@ -198,20 +241,158 @@ class NavigationViewModel : ViewModel() {
                 targetPosition = null,
                 path = null,
                 pathPoints = null,
-                floorMaskOverlay = null  // Also reset floor mask
+                floorMaskOverlay = null
             )
         }
         Log.d(TAG, "🎯 Target object changed to: $normalizedLabel")
     }
 
-
     fun toggleObjectSelector() {
         _uiState.update { it.copy(showObjectSelector = !it.showObjectSelector) }
+        Log.d(TAG, "⚙️ Object selector toggled: ${_uiState.value.showObjectSelector}")
     }
 
     fun startNavigation() {
-        _uiState.update { it.copy(isNavigating = true, showObjectSelector = false) }
-        Log.d(TAG, "▶️ Navigation STARTED")
+        val targetObject = _uiState.value.targetObject
+        if (targetObject.isEmpty()) {
+            Log.w(TAG, "⚠️ Cannot start navigation: no target object selected")
+            ttsManager?.speak("Please select a target object first")
+            return
+        }
+
+        _uiState.update {
+            it.copy(
+                isNavigating = true,
+                showObjectSelector = false
+            )
+        }
+        targetDetectedCount = 0
+        targetLostCount = 0
+        lastAnnouncedCommand = null
+
+        ttsManager?.speakImmediate("Navigating to $targetObject")
+        Log.d(TAG, "🚀 Navigation started for: $targetObject")
+    }
+
+    fun stopNavigation() {
+        _uiState.update {
+            it.copy(
+                isNavigating = false,
+                navigationCommand = "Navigation stopped",
+                path = null,
+                pathPoints = null,
+                targetPosition = null
+            )
+        }
+        lastAnnouncedCommand = null
+        targetDetectedCount = 0
+        targetLostCount = 0
+
+        ttsManager?.speakImmediate("Navigation stopped")
+        Log.d(TAG, "🛑 Navigation stopped")
+    }
+
+    fun describeScene() {
+        viewModelScope.launch {
+            val detections = _uiState.value.detectedObjects
+            if (detections.isEmpty()) {
+                ttsManager?.speak("No objects detected in view")
+                _uiState.update { it.copy(isSpeaking = true) }
+                return@launch
+            }
+
+            val objectCounts = detections.groupingBy { it.label }.eachCount()
+            val description = buildString {
+                append("I can see ")
+                objectCounts.entries.forEachIndexed { index, (obj, count) ->
+                    if (index > 0 && index == objectCounts.size - 1) {
+                        append(" and ")
+                    } else if (index > 0) {
+                        append(", ")
+                    }
+                    append("$count $obj")
+                    if (count > 1) append("s")
+                }
+            }
+
+            _uiState.update { it.copy(isSpeaking = true) }
+            ttsManager?.speak(description)
+            Log.d(TAG, "🔊 Scene description: $description")
+
+            // Reset speaking state after delay
+            delay(3000)
+            _uiState.update { it.copy(isSpeaking = false) }
+        }
+    }
+
+    fun stopSpeaking() {
+        ttsManager?.stop()
+        _uiState.update { it.copy(isSpeaking = false) }
+        Log.d(TAG, "🔇 TTS stopped")
+    }
+
+    private fun announceNavigationCommand(command: String?) {
+        if (command.isNullOrBlank()) return
+
+        if (command.contains("Searching", ignoreCase = true) ||
+            command.contains("Analyzing", ignoreCase = true)
+        ) {
+            return
+        }
+
+        if (command.contains("Arrived", ignoreCase = true) ||
+            command.contains("destination", ignoreCase = true)
+        ) {
+            _uiState.update { it.copy(isSpeaking = true) }
+            ttsManager?.speakImmediate(command)
+            lastAnnouncedCommand = command
+            viewModelScope.launch {
+                delay(2000)
+                _uiState.update { it.copy(isSpeaking = false) }
+            }
+            return
+        }
+
+        val currentTime = System.currentTimeMillis()
+        val timeSinceLastAnnouncement = currentTime - lastTTSAnnouncementTime.get()
+
+        val shouldAnnounce = (command != lastAnnouncedCommand) ||
+                (timeSinceLastAnnouncement >= Config.TTS_ANNOUNCEMENT_INTERVAL_MS)
+
+        if (shouldAnnounce) {
+            _uiState.update { it.copy(isSpeaking = true) }
+            ttsManager?.speak(command)
+            lastAnnouncedCommand = command
+            lastTTSAnnouncementTime.set(currentTime)
+            Log.d(TAG, "🔊 TTS: $command")
+
+            viewModelScope.launch {
+                delay(2000)
+                _uiState.update { it.copy(isSpeaking = false) }
+            }
+        }
+    }
+
+    fun cleanup() {
+        isShuttingDown.set(true)
+        viewModelScope.launch {
+            delay(200) // Wait for any pending UI operations
+
+            try {
+                if (previousCameraImage?.isRecycled == false) {
+                    previousCameraImage?.recycle()
+                }
+                if (previousFloorMask?.isRecycled == false) {
+                    previousFloorMask?.recycle()
+                }
+                previousCameraImage = null
+                previousFloorMask = null
+                ttsManager?.shutdown()
+                Log.d(TAG, "🧹 Cleanup completed with TTS shutdown")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error during cleanup", e)
+            }
+        }
     }
 
     override fun onCleared() {
@@ -219,7 +400,6 @@ class NavigationViewModel : ViewModel() {
         Log.d(TAG, "🧹 Cleaning up NavigationViewModel...")
         isShuttingDown.set(true)
 
-        // Wait for processing to complete
         var waitCount = 0
         while (isProcessingFrame.get() && waitCount < 20) {
             Thread.sleep(100)
@@ -228,18 +408,21 @@ class NavigationViewModel : ViewModel() {
 
         try {
             viewModelScope.cancel()
-            Thread.sleep(100)
+            Thread.sleep(200)
 
-            previousCameraImage?.recycle()
-            previousFloorMask?.recycle()
+            if (previousCameraImage?.isRecycled == false) {
+                previousCameraImage?.recycle()
+            }
+            if (previousFloorMask?.isRecycled == false) {
+                previousFloorMask?.recycle()
+            }
             previousCameraImage = null
             previousFloorMask = null
-
             objectDetector?.close()
             objectDetector = null
             floorSegmenter = null
+            ttsManager?.shutdown()
             applicationContext = null
-
             Log.d(TAG, "✅ NavigationViewModel cleaned up successfully")
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error during cleanup", e)

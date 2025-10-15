@@ -15,5 +15,8 @@ data class NavigationUiState(
     val navigationCommand: String = "Initializing...",
     val isNavigating: Boolean = false,
     val showObjectSelector: Boolean = true, // Show selector at start
-    val pathPoints: List<PointF>? = null
+    val pathPoints: List<PointF>? = null,
+    // NEW: TTS and UI state
+    val isSpeaking: Boolean = false,
+    val lastSpokenCommand: String? = null
 )
