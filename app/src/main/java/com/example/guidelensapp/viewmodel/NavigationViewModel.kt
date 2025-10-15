@@ -9,10 +9,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.guidelensapp.Config
 import com.example.guidelensapp.accessibility.TextToSpeechManager
+import com.example.guidelensapp.ml.DetectionResult
 import com.example.guidelensapp.ml.ObjectDetector
 import com.example.guidelensapp.ml.FloorSegmenter
 import com.example.guidelensapp.navigation.NavigationOutput
 import com.example.guidelensapp.navigation.PathPlanner
+import com.example.guidelensapp.sensors.SpatialTracker
 import com.example.guidelensapp.utils.ThreadManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -41,6 +43,10 @@ class NavigationViewModel : ViewModel() {
     private var targetDetectedCount = 0
     private var targetLostCount = 0
 
+    private var spatialTracker: SpatialTracker? = null
+    private var lastSpatialUpdate = AtomicLong(0L)
+    private val SPATIAL_UPDATE_INTERVAL = 500L // Update every 500ms
+
     companion object {
         private const val TAG = "NavigationViewModel"
     }
@@ -60,6 +66,16 @@ class NavigationViewModel : ViewModel() {
                 ttsManager = TextToSpeechManager(context)
                 ttsManager?.speechRate = Config.TTS_SPEECH_RATE
                 ttsManager?.pitch = Config.TTS_PITCH
+
+                // NEW: Initialize spatial tracker
+                spatialTracker = SpatialTracker(context)
+                spatialTracker?.startTracking()
+
+                // Start orientation update loop
+                startOrientationUpdates()
+
+                Log.d(TAG, "✅ Models initialized with spatial tracking")
+
                 Log.d(TAG, "NavigationViewModel initialized with TTS")
 
                 Log.d(TAG, "✅ Models initialized successfully")
@@ -77,6 +93,54 @@ class NavigationViewModel : ViewModel() {
                 Log.e(TAG, "❌ Failed to initialize models", e)
                 _uiState.update { it.copy(navigationCommand = "Initialization failed: ${e.message}") }
             }
+        }
+    }
+
+    /**
+     * Continuously update device orientation in UI state
+     */
+    private fun startOrientationUpdates() {
+        viewModelScope.launch {
+            while (true) {
+                delay(100) // Update at 10Hz
+                spatialTracker?.let { tracker ->
+                    val orientation = tracker.getCurrentOrientation()
+                    _uiState.update { it.copy(currentOrientation = orientation) }
+                }
+            }
+        }
+    }
+
+    /**
+     * Update spatial tracker with detections
+     */
+    private fun updateSpatialTracking(
+        detections: List<DetectionResult>,
+        imageWidth: Int,
+        imageHeight: Int
+    ) {
+        val currentTime = System.currentTimeMillis()
+        if (currentTime - lastSpatialUpdate.get() < SPATIAL_UPDATE_INTERVAL) return
+
+        spatialTracker?.let { tracker ->
+            tracker.updateWithDetections(detections, imageWidth, imageHeight)
+
+            val allTrackedObjects = tracker.getAllTrackedObjects()
+            _uiState.update { it.copy(spatialObjects = allTrackedObjects) }
+
+            // If navigating, provide off-screen guidance
+            if (_uiState.value.isNavigating) {
+                val guidance = tracker.getDirectionToObject(_uiState.value.targetObject)
+                if (guidance != null && !guidance.isVisible) {
+                    val offScreenMsg = "${_uiState.value.targetObject} is ${guidance.direction}"
+                    _uiState.update { it.copy(offScreenGuidance = offScreenMsg) }
+                    Log.d(TAG, "🧭 Off-screen guidance: $offScreenMsg")
+                } else {
+                    _uiState.update { it.copy(offScreenGuidance = null) }
+                }
+            }
+
+            lastSpatialUpdate.set(currentTime)
         }
     }
 
@@ -121,6 +185,7 @@ class NavigationViewModel : ViewModel() {
                 val targetPos = targetObject?.let {
                     PointF(it.boundingBox.centerX(), it.boundingBox.centerY())
                 }
+                updateSpatialTracking(detections, bitmap.width, bitmap.height)
 
                 // Floor Segmentation
                 val floorMask = if (_uiState.value.isNavigating) {
@@ -139,20 +204,28 @@ class NavigationViewModel : ViewModel() {
                 val navigationOutput = when {
                     _uiState.value.isNavigating && floorMask != null && targetPos != null -> {
                         try {
-                            Log.d(
-                                TAG,
-                                "🧭 Running path planning to $targetObjectName at (${targetPos.x},${targetPos.y})..."
-                            )
+                            Log.d(TAG, "🧭 Running sensor-integrated path planning...")
+
+                            // Get spatial guidance for off-screen targets
+                            val spatialGuidance = if (targetObject == null) {
+                                spatialTracker?.getDirectionToObject(targetObjectName)
+                            } else {
+                                null
+                            }
+
+                            // Get current device orientation
+                            val (azimuth, _, _) = spatialTracker?.getCurrentOrientation() ?: Triple(0f, 0f, 0f)
+
                             val navResult = PathPlanner.getNavigationCommand(
                                 floorMask = floorMask,
                                 targetPosition = targetPos,
                                 imageWidth = bitmapCopy.width,
-                                imageHeight = bitmapCopy.height
+                                imageHeight = bitmapCopy.height,
+                                spatialGuidance = spatialGuidance,
+                                currentAzimuth = azimuth
                             )
-                            Log.d(
-                                TAG,
-                                "📍 Path planning result: ${navResult.command}, path points: ${navResult.path?.size ?: 0}"
-                            )
+
+                            Log.d(TAG, "📍 Nav result: ${navResult.command}, centered: ${navResult.targetCentered}")
                             announceNavigationCommand(navResult.command)
                             navResult
                         } catch (e: Exception) {
@@ -160,17 +233,29 @@ class NavigationViewModel : ViewModel() {
                             NavigationOutput("Navigation error", null)
                         }
                     }
-
                     _uiState.value.isNavigating && floorMask == null && targetPos != null -> {
                         Log.d(TAG, "⏳ Waiting for floor mask...")
                         NavigationOutput("Analyzing floor...", null)
                     }
-
                     _uiState.value.isNavigating -> {
                         Log.d(TAG, "🔍 Searching for $targetObjectName...")
-                        NavigationOutput("Searching for $targetObjectName...", null)
-                    }
 
+                        // Use spatial guidance even when target not visible
+                        val spatialGuidance = spatialTracker?.getDirectionToObject(targetObjectName)
+                        if (spatialGuidance != null) {
+                            val (azimuth, _, _) = spatialTracker?.getCurrentOrientation() ?: Triple(0f, 0f, 0f)
+                            PathPlanner.getNavigationCommand(
+                                floorMask = floorMask ?: bitmapCopy,
+                                targetPosition = null,
+                                imageWidth = bitmapCopy.width,
+                                imageHeight = bitmapCopy.height,
+                                spatialGuidance = spatialGuidance,
+                                currentAzimuth = azimuth
+                            )
+                        } else {
+                            NavigationOutput("Searching for $targetObjectName...", null)
+                        }
+                    }
                     else -> null
                 }
 
@@ -275,21 +360,34 @@ class NavigationViewModel : ViewModel() {
     }
 
     fun stopNavigation() {
-        _uiState.update {
-            it.copy(
-                isNavigating = false,
-                navigationCommand = "Navigation stopped",
-                path = null,
-                pathPoints = null,
-                targetPosition = null
-            )
-        }
-        lastAnnouncedCommand = null
-        targetDetectedCount = 0
-        targetLostCount = 0
+        viewModelScope.launch {
+            // Clear spatial memory
+            spatialTracker?.clearMemory()
 
-        ttsManager?.speakImmediate("Navigation stopped")
-        Log.d(TAG, "🛑 Navigation stopped")
+            // Reset all navigation state
+            _uiState.update {
+                it.copy(
+                    isNavigating = false,
+                    navigationCommand = "Ready",
+                    path = null,
+                    pathPoints = null,
+                    targetPosition = null,
+                    offScreenGuidance = null,
+                    spatialObjects = emptyList(), // Clear UI spatial objects
+                    floorMaskOverlay = null,
+                    detectedObjects = emptyList() // Clear current detections
+                )
+            }
+
+            // Reset tracking counters
+            lastAnnouncedCommand = null
+            targetDetectedCount = 0
+            targetLostCount = 0
+
+            // Announce stop
+            ttsManager?.speakImmediate("Navigation stopped")
+            Log.d(TAG, "🛑 Navigation stopped and memory cleared")
+        }
     }
 
     fun describeScene() {
@@ -397,6 +495,8 @@ class NavigationViewModel : ViewModel() {
 
     override fun onCleared() {
         super.onCleared()
+        spatialTracker?.stopTracking()
+        spatialTracker = null
         Log.d(TAG, "🧹 Cleaning up NavigationViewModel...")
         isShuttingDown.set(true)
 

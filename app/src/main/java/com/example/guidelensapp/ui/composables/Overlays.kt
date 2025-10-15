@@ -2,24 +2,31 @@ package com.example.guidelensapp.ui.composables
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.guidelensapp.viewmodel.NavigationUiState
 import androidx.core.graphics.toColorInt
+import kotlin.math.cos
+import kotlin.math.sin
 
 @Composable
 fun OverlayCanvas(uiState: NavigationUiState) {
@@ -176,3 +183,83 @@ fun NavigationOverlay(uiState: NavigationUiState) {
         }
     }
 }
+@Composable
+fun SpatialCompassOverlay(uiState: NavigationUiState) {
+    Box(
+        modifier = Modifier.fillMaxSize()
+    ) {
+        // Compact compass in top-right corner
+        Canvas(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(top = 100.dp, end = 16.dp)
+                .size(120.dp)
+                .shadow(8.dp, CircleShape)
+                .background(Color.Black.copy(alpha = 0.6f), CircleShape)
+                .padding(8.dp)
+        ) {
+            val center = Offset(size.width / 2f, size.height / 2f)
+            val radius = size.width / 2f - 10f
+            val (azimuth, _, _) = uiState.currentOrientation
+
+            // Draw outer ring
+            drawCircle(
+                color = Color.White.copy(alpha = 0.5f),
+                radius = radius,
+                center = center,
+                style = Stroke(width = 2f)
+            )
+
+            // Draw cardinal directions
+            listOf("N" to 0f, "E" to 90f, "S" to 180f, "W" to 270f).forEach { (label, angle) ->
+                val rad = Math.toRadians((angle - azimuth).toDouble()).toFloat()
+                val x = center.x + radius * sin(rad) * 0.8f
+                val y = center.y - radius * cos(rad) * 0.8f
+
+                drawContext.canvas.nativeCanvas.drawText(
+                    label,
+                    x,
+                    y,
+                    android.graphics.Paint().apply {
+                        color = android.graphics.Color.WHITE
+                        textSize = 24f
+                        textAlign = android.graphics.Paint.Align.CENTER
+                        isAntiAlias = true
+                        isFakeBoldText = true
+                    }
+                )
+            }
+
+            // Draw tracked objects
+            uiState.spatialObjects.take(5).forEach { obj ->
+                val angleDiff = obj.azimuth - azimuth
+                val rad = Math.toRadians(angleDiff.toDouble()).toFloat()
+                val distance = radius * 0.6f
+                val x = center.x + distance * sin(rad)
+                val y = center.y - distance * cos(rad)
+
+                val markerColor = if (obj.isVisible) Color.Green else Color.Yellow.copy(alpha = obj.confidence)
+
+                // Draw marker
+                drawCircle(
+                    color = markerColor,
+                    radius = 6f,
+                    center = Offset(x, y)
+                )
+            }
+
+            // Draw heading indicator (red arrow)
+            val arrowPath = androidx.compose.ui.graphics.Path().apply {
+                moveTo(center.x, center.y - radius * 0.5f)
+                lineTo(center.x - 8f, center.y - radius * 0.3f)
+                lineTo(center.x + 8f, center.y - radius * 0.3f)
+                close()
+            }
+            drawPath(
+                path = arrowPath,
+                color = Color.Red
+            )
+        }
+    }
+}
+

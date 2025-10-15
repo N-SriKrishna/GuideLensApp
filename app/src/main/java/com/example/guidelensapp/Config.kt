@@ -53,17 +53,15 @@ object Config {
 
     // --- Model & Detection Configuration ---
     val NAVIGABLE_OBJECTS = listOf(
-        "chair", "door", "table", "bed", "couch", "toilet", "sink",
-        "refrigerator", "stairs", "person", "bottle", "cup", "laptop",
-        "phone", "keyboard", "mouse"
+        "person", "chair", "couch", "bed", "dining table",
+        "toilet", "tv", "laptop", "mouse", "keyboard",
+        "cell phone", "microwave", "oven", "sink", "refrigerator",
+        "book", "clock", "vase", "scissors", "bottle",
+        "cup", "fork", "knife", "spoon", "bowl", "door"
     )
-
-    // --- Navigation & Logic Configuration ---
-    const val PATHFINDING_GRID_SCALE = 15
-    const val PP_LOOKAHEAD_DISTANCE_PX = 100f
-    const val PP_SHARP_TURN_K = 0.05f
-    const val PP_SLIGHT_TURN_K = 0.02f
-    const val INFLATION_RADIUS_GRID = 1
+    // Navigation - NEW VFH system (removed old A* configs)
+    const val VFH_SCAN_RADIUS_MULTIPLIER = 0.35f // Scan area around user
+    const val VFH_SAFETY_MARGIN = 50 // Pixels to maintain from obstacles
 
     // --- ADAPTIVE PERFORMANCE SETTINGS ---
 
