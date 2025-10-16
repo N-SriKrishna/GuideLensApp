@@ -528,4 +528,103 @@ class NavigationViewModel : ViewModel() {
             Log.e(TAG, "❌ Error during cleanup", e)
         }
     }
+    // Add these methods to your existing NavigationViewModel.kt
+
+    fun setAppMode(mode: AppMode) {
+        _uiState.update { it.copy(appMode = mode, showModeSelector = false) }
+
+        // Announce mode
+        val announcement = when (mode) {
+            AppMode.SIMPLE_NAVIGATION -> "Simple navigation mode activated. " +
+                    "Interface is audio-only. Tap the top half of screen for scene controls, " +
+                    "bottom half for navigation controls."
+            AppMode.DEBUG_MODE -> "Debug mode activated. Visual overlays enabled."
+        }
+        speak(announcement, Config.TTSPriority.EMERGENCY)
+    }
+
+    fun showModeSelector() {
+        _uiState.update { it.copy(showModeSelector = true) }
+        speak("Returning to mode selection screen.", Config.TTSPriority.NAVIGATION)
+    }
+
+    fun toggleContinuousGuidance() {
+        _uiState.update { it.copy(continuousAudioGuidance = !it.continuousAudioGuidance) }
+    }
+
+    fun toggleHapticFeedback() {
+        _uiState.update { it.copy(hapticFeedbackEnabled = !it.hapticFeedbackEnabled) }
+    }
+    fun speak(text: String, priority: Int = Config.TTSPriority.NAVIGATION) {
+        if (text.isBlank()) {
+            Log.w(TAG, "⚠️ Empty text, skipping speech")
+            return
+        }
+
+        when (priority) {
+            Config.TTSPriority.EMERGENCY -> {
+                // Interrupt current speech for emergency messages
+                ttsManager?.speakImmediate(text)
+                _uiState.update { it.copy(isSpeaking = true, lastSpokenCommand = text) }
+                Log.d(TAG, "🔊 EMERGENCY TTS: $text")
+            }
+            else -> {
+                // Queue for non-emergency messages
+                ttsManager?.speak(text)
+                _uiState.update { it.copy(lastSpokenCommand = text) }
+                Log.d(TAG, "🔊 TTS: $text (Priority: $priority)")
+            }
+        }
+
+        // Auto-reset speaking state
+        viewModelScope.launch {
+            delay(2000)
+            _uiState.update { it.copy(isSpeaking = false) }
+        }
+    }
+
+    /**
+     * Speak text immediately, interrupting current speech (convenience method)
+     */
+    fun speakImmediate(text: String) {
+        speak(text, Config.TTSPriority.EMERGENCY)
+    }
+    fun togglePerformanceOverlay() {
+        _uiState.update {
+            it.copy(showPerformanceOverlay = !it.showPerformanceOverlay)
+        }
+        Log.d(TAG, "📊 Performance overlay toggled: ${_uiState.value.showPerformanceOverlay}")
+    }
+
+    /**
+     * Toggle voice commands on/off
+     */
+    fun toggleVoiceCommands() {
+        val newValue = !_uiState.value.voiceCommandsEnabled
+        _uiState.update {
+            it.copy(
+                voiceCommandsEnabled = newValue,
+                isListeningForCommands = newValue
+            )
+        }
+
+        if (newValue) {
+            startVoiceCommands()
+        } else {
+            stopVoiceCommands()
+        }
+
+        Log.d(TAG, "🎤 Voice commands: $newValue")
+    }
+    fun startVoiceCommands() {
+        Log.d(TAG, "Voice commands - Not yet implemented")
+        ttsManager?.speak("Voice commands will be available soon")
+    }
+
+    fun stopVoiceCommands() {
+        Log.d(TAG, "Voice commands stopped")
+    }
+
+
 }
+

@@ -2,8 +2,20 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Permissions -->
+    <!-- Camera permission for navigation -->
     <uses-permission android:name="android.permission.CAMERA" />
+
+    <!-- Microphone permission for voice commands -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- Internet permission (if needed for any online features) -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Optional: Keep screen on during navigation -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Vibration for haptic feedback -->
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <!-- S23 Hardware Features -->
     <uses-feature android:name="android.hardware.camera" android:required="true" />

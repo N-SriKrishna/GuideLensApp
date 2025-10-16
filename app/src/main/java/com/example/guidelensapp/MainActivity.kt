@@ -1,3 +1,5 @@
+// app/src/main/java/com/example/guidelensapp/MainActivity.kt
+
 package com.example.guidelensapp
 
 import android.Manifest
@@ -6,19 +8,25 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
 import androidx.compose.animation.*
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -26,10 +34,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.guidelensapp.ui.composables.*
 import com.example.guidelensapp.ui.theme.GuideLensAppTheme
+import com.example.guidelensapp.viewmodel.AppMode
 import com.example.guidelensapp.viewmodel.NavigationUiState
 import com.example.guidelensapp.viewmodel.NavigationViewModel
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
+import com.example.guidelensapp.ui.composables.EnhancedObjectSelector
+import com.example.guidelensapp.ui.composables.CompactFPSCounter
 
 class MainActivity : ComponentActivity() {
     private val viewModel: NavigationViewModel by viewModels()
@@ -37,14 +48,18 @@ class MainActivity : ComponentActivity() {
     @OptIn(ExperimentalPermissionsApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         setContent {
             GuideLensAppTheme {
+                // Request both CAMERA and RECORD_AUDIO permissions
                 val permissionsState = rememberMultiplePermissionsState(
-                    permissions = listOf(Manifest.permission.CAMERA)
+                    permissions = listOf(
+                        Manifest.permission.CAMERA,
+                        Manifest.permission.RECORD_AUDIO  // Added microphone permission
+                    )
                 )
 
                 LaunchedEffect(Unit) {
+                    // Request permissions on app start
                     permissionsState.launchMultiplePermissionRequest()
                 }
 
@@ -53,7 +68,21 @@ class MainActivity : ComponentActivity() {
                     color = MaterialTheme.colorScheme.background
                 ) {
                     if (permissionsState.allPermissionsGranted) {
-                        NavigationScreen(viewModel = viewModel)
+                        val uiState by viewModel.uiState.collectAsState()
+
+                        // Show mode selector if not selected
+                        if (uiState.showModeSelector) {
+                            StartScreen(
+                                onModeSelected = { mode ->
+                                    viewModel.setAppMode(mode)
+                                },
+                                onSpeak = { text, priority ->
+                                    viewModel.speak(text, priority)
+                                }
+                            )
+                        } else {
+                            NavigationScreen(viewModel = viewModel)
+                        }
                     } else {
                         PermissionDeniedScreen()
                     }
@@ -61,6 +90,7 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
 
     override fun onDestroy() {
         viewModel.cleanup()
@@ -85,33 +115,107 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
             })
         }
 
+        // Conditional rendering based on mode
+        when (uiState.appMode) {
+            AppMode.SIMPLE_NAVIGATION -> {
+                SimpleNavigationUI(uiState = uiState, viewModel = viewModel)
+            }
+            AppMode.DEBUG_MODE -> {
+                DebugNavigationUI(uiState = uiState, viewModel = viewModel)
+            }
+        }
+    }
+}
+@Composable
+fun SimpleNavigationUI(
+    uiState: NavigationUiState,
+    viewModel: NavigationViewModel
+) {
+    // Black screen with minimal visual elements
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+    ) {
+        // Large touch zones for accessibility
+        Column(
+            modifier = Modifier.fillMaxSize()
+        ) {
+            // Top half: Object selection and scene description
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .background(Color(0xFF1A1A1A)),
+                contentAlignment = Alignment.Center
+            ) {
+                SimpleNavigationTopZone(uiState = uiState, viewModel = viewModel)
+            }
+
+            // Bottom half: Start/Stop navigation
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .background(Color(0xFF0D0D0D)),
+                contentAlignment = Alignment.Center
+            ) {
+                SimpleNavigationBottomZone(uiState = uiState, viewModel = viewModel)
+            }
+        }
+
+        // Status banner at top
+        SimpleStatusBanner(uiState = uiState, viewModel = viewModel)
+    }
+}
+
+
+@Composable
+fun DebugNavigationUI(
+    uiState: NavigationUiState,
+    viewModel: NavigationViewModel
+) {
+    Box(modifier = Modifier.fillMaxSize()) {
         // Main camera feed and overlays
         OverlayCanvas(uiState = uiState)
 
         // Spatial compass (only during navigation)
         AnimatedVisibility(
             visible = uiState.isNavigating,
-            enter = fadeIn() + slideInVertically(
-                animationSpec = spring(stiffness = Spring.StiffnessLow)
-            ),
-            exit = fadeOut() + slideOutVertically()
+            enter = fadeIn() + scaleIn(),
+            exit = fadeOut() + scaleOut()
         ) {
             SpatialCompassOverlay(uiState = uiState)
         }
 
-        // Top status bar
-        TopStatusBar(uiState = uiState, viewModel = viewModel)
+        // Enhanced Top Bar with gradient
+        EnhancedTopBar(uiState = uiState, viewModel = viewModel)
 
-        // Bottom control panel
-        BottomControlPanel(uiState = uiState, viewModel = viewModel)
+        // Floating Action Buttons on the right
+        FloatingControlPanel(
+            uiState = uiState,
+            viewModel = viewModel,
+            modifier = Modifier.align(Alignment.CenterEnd)
+        )
+
+        // Bottom navigation command
+        AnimatedVisibility(
+            visible = uiState.navigationCommand.isNotEmpty(),
+            enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+            exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+            modifier = Modifier.align(Alignment.BottomCenter)
+        ) {
+            NavigationCommandBanner(uiState = uiState)
+        }
 
         // Object selector dialog
         if (uiState.showObjectSelector) {
-            ObjectSelectorView(
+            EnhancedObjectSelector(
                 currentTarget = uiState.targetObject,
                 onTargetSelected = { target ->
                     viewModel.setTargetObject(target)
                 },
+                onDismiss = { viewModel.toggleObjectSelector() },
                 onStartNavigation = {
                     viewModel.startNavigation()
                 }
@@ -122,17 +226,42 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
         uiState.offScreenGuidance?.let { guidance ->
             AnimatedVisibility(
                 visible = true,
-                enter = slideInVertically() + fadeIn(),
-                modifier = Modifier.align(Alignment.TopCenter)
+                enter = slideInVertically(initialOffsetY = { -it }) + fadeIn(),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 80.dp)
             ) {
                 OffScreenGuidanceBanner(guidance)
             }
         }
+
+        // Compact FPS counter (top-left)
+        if (uiState.showPerformanceOverlay) {
+            CompactFPSCounter(
+                fps = uiState.performanceMetrics.currentFPS,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(16.dp)
+                    .statusBarsPadding()
+            )
+
+            // Full performance overlay (top-right)
+            PerformanceOverlay(
+                metrics = uiState.performanceMetrics,
+                isVisible = true,
+                onDismiss = { viewModel.togglePerformanceOverlay() },
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(16.dp)
+                    .statusBarsPadding()
+            )
+        }
     }
+
 }
 
 @Composable
-fun TopStatusBar(
+fun EnhancedTopBar(
     uiState: NavigationUiState,
     viewModel: NavigationViewModel
 ) {
@@ -140,179 +269,134 @@ fun TopStatusBar(
         modifier = Modifier
             .fillMaxWidth()
             .statusBarsPadding(),
-        color = Color.Black.copy(alpha = 0.6f)
+        color = Color.Transparent
     ) {
-        Row(
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // App title and status
-            Column {
-                Text(
-                    text = "GuideLens",
-                    color = Color.White,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold
-                )
-
-                AnimatedContent(
-                    targetState = uiState.isNavigating,
-                    transitionSpec = {
-                        fadeIn() togetherWith fadeOut()
-                    }
-                ) { isNavigating ->
-                    if (isNavigating) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Default.Navigation,
-                                contentDescription = null,
-                                tint = Color.Green,
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = "Navigating to ${uiState.targetObject}",
-                                color = Color.Green,
-                                fontSize = 12.sp
-                            )
-                        }
-                    } else {
-                        Text(
-                            text = "Ready",
-                            color = Color.White.copy(alpha = 0.7f),
-                            fontSize = 12.sp
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            Color.Black.copy(alpha = 0.8f),
+                            Color.Transparent
                         )
-                    }
-                }
-            }
-
-            // Settings button
-            IconButton(
-                onClick = { viewModel.toggleObjectSelector() },
-                modifier = Modifier
-                    .size(40.dp)
-                    .background(
-                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.3f),
-                        shape = CircleShape
                     )
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Settings,
-                    contentDescription = "Settings",
-                    tint = Color.White
                 )
-            }
-        }
-    }
-}
-
-@Composable
-fun BoxScope.BottomControlPanel(
-    uiState: NavigationUiState,
-    viewModel: NavigationViewModel
-) {
-    Column(
-        modifier = Modifier
-            .align(Alignment.BottomCenter)
-            .fillMaxWidth()
-    ) {
-        // Navigation command banner
-        AnimatedVisibility(
-            visible = uiState.navigationCommand.isNotEmpty(),
-            enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-            exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
-        ) {
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                shape = MaterialTheme.shapes.large,
-                color = Color.Black.copy(alpha = 0.8f),
-                shadowElevation = 8.dp
-            ) {
-                Row(
-                    modifier = Modifier.padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.VolumeUp,
-                        contentDescription = null,
-                        tint = Color.White,
-                        modifier = Modifier.size(24.dp)
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Text(
-                        text = uiState.navigationCommand,
-                        color = Color.White,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Medium,
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-            }
-        }
-
-        // Main control buttons
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding(),
-            color = Color.Black.copy(alpha = 0.7f),
-            shadowElevation = 16.dp
+                .padding(horizontal = 20.dp, vertical = 16.dp)
         ) {
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 16.dp, horizontal = 24.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly,
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Scene description button
-                NavigationFAB(
-                    icon = Icons.Default.Description,
-                    label = "Describe",
-                    onClick = { viewModel.describeScene() },
-                    containerColor = MaterialTheme.colorScheme.primary
-                )
-
-                // Stop/Mute button
-                AnimatedContent(
-                    targetState = uiState.isNavigating to uiState.isSpeaking,
-                    transitionSpec = {
-                        scaleIn() togetherWith scaleOut()
+                // Left side - App branding with icon
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(40.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Explore,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier
+                                .size(40.dp)
+                                .padding(8.dp)
+                        )
                     }
-                ) { (isNavigating, isSpeaking) ->
-                    when {
-                        isNavigating -> NavigationFAB(
-                            icon = Icons.Default.Stop,
-                            label = "Stop Nav",
-                            onClick = { viewModel.stopNavigation() },
-                            containerColor = Color(0xFFE53935),
-                            size = 70
+
+                    Column {
+                        Text(
+                            text = "GuideLens",
+                            color = Color.White,
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold
                         )
-                        isSpeaking -> NavigationFAB(
-                            icon = Icons.Default.VolumeOff,
-                            label = "Mute",
-                            onClick = { viewModel.stopSpeaking() },
-                            containerColor = Color(0xFFFF9800)
-                        )
-                        else -> Spacer(modifier = Modifier.size(56.dp))
+
+                        AnimatedContent(
+                            targetState = uiState.isNavigating,
+                            transitionSpec = {
+                                fadeIn() togetherWith fadeOut()
+                            }
+                        ) { isNavigating ->
+                            if (isNavigating) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.Navigation,
+                                        contentDescription = null,
+                                        tint = Color(0xFF4CAF50),
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Text(
+                                        text = "→ ${uiState.targetObject.replaceFirstChar { it.uppercase() }}",
+                                        color = Color(0xFF4CAF50),
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                            } else {
+                                Text(
+                                    text = "Debug Mode",
+                                    color = Color.White.copy(alpha = 0.7f),
+                                    fontSize = 13.sp
+                                )
+                            }
+                        }
                     }
                 }
 
-                // Start navigation placeholder (when not navigating)
-                if (!uiState.isNavigating) {
-                    NavigationFAB(
-                        icon = Icons.Default.Explore,
-                        label = "Navigate",
-                        onClick = { viewModel.toggleObjectSelector() },
-                        containerColor = Color(0xFF4CAF50)
-                    )
-                } else {
-                    Spacer(modifier = Modifier.size(56.dp))
+                // Right side - Quick actions
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Voice commands indicator
+                    if (uiState.voiceCommandsEnabled) {
+                        IconButton(
+                            onClick = { viewModel.toggleVoiceCommands() },
+                            modifier = Modifier
+                                .size(40.dp)
+                                .background(
+                                    color = Color(0xFF4CAF50).copy(alpha = 0.3f),
+                                    shape = CircleShape
+                                )
+                        ) {
+                            Icon(
+                                imageVector = if (uiState.isListeningForCommands)
+                                    Icons.Filled.Mic
+                                else
+                                    Icons.Outlined.MicOff,
+                                contentDescription = "Voice Commands",
+                                tint = Color(0xFF4CAF50),
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                    }
+
+                    // Mode switcher
+                    IconButton(
+                        onClick = { viewModel.showModeSelector() },
+                        modifier = Modifier
+                            .size(40.dp)
+                            .background(
+                                color = Color.White.copy(alpha = 0.2f),
+                                shape = CircleShape
+                            )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.SwapHoriz,
+                            contentDescription = "Change Mode",
+                            tint = Color.White,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
                 }
             }
         }
@@ -320,38 +404,148 @@ fun BoxScope.BottomControlPanel(
 }
 
 @Composable
-fun NavigationFAB(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    label: String,
-    onClick: () -> Unit,
-    containerColor: Color,
-    size: Int = 56
+fun FloatingControlPanel(
+    uiState: NavigationUiState,
+    viewModel: NavigationViewModel,
+    modifier: Modifier = Modifier
 ) {
     Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(4.dp)
+        modifier = modifier
+            .padding(end = 16.dp)
+            .navigationBarsPadding(),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+        horizontalAlignment = Alignment.End
     ) {
+        // Performance monitor toggle
         FloatingActionButton(
-            onClick = onClick,
-            containerColor = containerColor,
+            onClick = { viewModel.togglePerformanceOverlay() },
+            containerColor = if (uiState.showPerformanceOverlay)
+                MaterialTheme.colorScheme.primary
+            else
+                Color(0xFF37474F),
             contentColor = Color.White,
-            modifier = Modifier
-                .size(size.dp)
-                .shadow(8.dp, CircleShape)
+            modifier = Modifier.size(56.dp)
         ) {
             Icon(
-                imageVector = icon,
-                contentDescription = label,
-                modifier = Modifier.size((size * 0.4).dp)
+                imageVector = Icons.Filled.Analytics,
+                contentDescription = "Performance",
+                modifier = Modifier.size(24.dp)
             )
         }
-        Text(
-            text = label,
-            color = Color.White,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Medium,
-            textAlign = TextAlign.Center
-        )
+
+        // Scene description
+        FloatingActionButton(
+            onClick = { viewModel.describeScene() },
+            containerColor = Color(0xFF2196F3),
+            contentColor = Color.White,
+            modifier = Modifier.size(56.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Description,
+                contentDescription = "Describe Scene",
+                modifier = Modifier.size(24.dp)
+            )
+        }
+
+        // Main navigation control (larger)
+        FloatingActionButton(
+            onClick = {
+                if (uiState.isNavigating) {
+                    viewModel.stopNavigation()
+                } else {
+                    viewModel.toggleObjectSelector()
+                }
+            },
+            containerColor = if (uiState.isNavigating)
+                Color(0xFFE53935)
+            else
+                Color(0xFF4CAF50),
+            contentColor = Color.White,
+            modifier = Modifier
+                .size(72.dp)
+                .shadow(12.dp, CircleShape)
+        ) {
+            Icon(
+                imageVector = if (uiState.isNavigating)
+                    Icons.Filled.Stop
+                else
+                    Icons.Filled.Navigation,
+                contentDescription = if (uiState.isNavigating) "Stop" else "Navigate",
+                modifier = Modifier.size(32.dp)
+            )
+        }
+
+        // Object selector
+        if (!uiState.isNavigating) {
+            FloatingActionButton(
+                onClick = { viewModel.toggleObjectSelector() },
+                containerColor = MaterialTheme.colorScheme.tertiary,
+                contentColor = Color.White,
+                modifier = Modifier.size(56.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Category,
+                    contentDescription = "Select Object",
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun NavigationCommandBanner(uiState: NavigationUiState) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 24.dp)
+            .navigationBarsPadding(),
+        shape = RoundedCornerShape(20.dp),
+        color = Color(0xFF1E1E1E),
+        shadowElevation = 12.dp
+    ) {
+        Row(
+            modifier = Modifier.padding(20.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            // Animated sound wave icon
+            val infiniteTransition = rememberInfiniteTransition(label = "sound")
+            val scale by infiniteTransition.animateFloat(
+                initialValue = 0.9f,
+                targetValue = 1.1f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(800, easing = FastOutSlowInEasing),
+                    repeatMode = RepeatMode.Reverse
+                ),
+                label = "scale"
+            )
+
+            Surface(
+                shape = CircleShape,
+                color = Color(0xFF2196F3).copy(alpha = 0.2f),
+                modifier = Modifier.size(48.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.VolumeUp,
+                    contentDescription = null,
+                    tint = Color(0xFF2196F3),
+                    modifier = Modifier
+                        .size(48.dp)
+                        .padding(12.dp)
+                        .graphicsLayer(scaleX = scale, scaleY = scale)
+                )
+            }
+
+            Text(
+                text = uiState.navigationCommand,
+                color = Color.White,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.weight(1f),
+                lineHeight = 22.sp
+            )
+        }
     }
 }
 
@@ -360,34 +554,32 @@ fun OffScreenGuidanceBanner(guidance: String) {
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
-            .statusBarsPadding(),
-        shape = MaterialTheme.shapes.medium,
-        color = Color(0xFFFFA000),
-        shadowElevation = 4.dp
+            .padding(horizontal = 20.dp),
+        shape = RoundedCornerShape(16.dp),
+        color = Color(0xFFFF9800),
+        shadowElevation = 8.dp
     ) {
         Row(
-            modifier = Modifier.padding(12.dp),
+            modifier = Modifier.padding(16.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center
         ) {
             Icon(
-                imageVector = Icons.Default.MyLocation,
+                imageVector = Icons.Filled.Explore,
                 contentDescription = null,
                 tint = Color.White,
-                modifier = Modifier.size(20.dp)
+                modifier = Modifier.size(24.dp)
             )
-            Spacer(modifier = Modifier.width(8.dp))
+            Spacer(modifier = Modifier.width(12.dp))
             Text(
                 text = guidance,
                 color = Color.White,
-                fontSize = 14.sp,
+                fontSize = 15.sp,
                 fontWeight = FontWeight.Bold
             )
         }
     }
 }
-
 
 @Composable
 fun PermissionDeniedScreen() {
@@ -400,31 +592,67 @@ fun PermissionDeniedScreen() {
     ) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(24.dp),
-            modifier = Modifier.padding(32.dp)
+            verticalArrangement = Arrangement.spacedBy(32.dp),
+            modifier = Modifier.padding(40.dp)
         ) {
-            Icon(
-                imageVector = Icons.Default.CameraAlt,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(80.dp)
-            )
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.errorContainer,
+                modifier = Modifier.size(120.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.CameraAlt,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onErrorContainer,
+                    modifier = Modifier
+                        .size(120.dp)
+                        .padding(32.dp)
+                )
+            }
 
-            Text(
-                text = "Camera Permission Required",
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onBackground,
-                textAlign = TextAlign.Center
-            )
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "Permissions Required",
+                    fontSize = 28.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    textAlign = TextAlign.Center
+                )
 
-            Text(
-                text = "GuideLens needs camera access to provide navigation assistance. Please enable it in your device settings.",
-                fontSize = 16.sp,
-                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
-                textAlign = TextAlign.Center,
-                lineHeight = 24.sp
-            )
+                Text(
+                    text = "GuideLens needs camera and microphone access to provide navigation assistance.",
+                    fontSize = 16.sp,
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
+                    textAlign = TextAlign.Center,
+                    lineHeight = 24.sp
+                )
+            }
+
+            Button(
+                onClick = { /* Navigate to settings */ },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(56.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary
+                ),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Settings,
+                    contentDescription = null,
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+                Text(
+                    text = "Open Settings",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
     }
 }
