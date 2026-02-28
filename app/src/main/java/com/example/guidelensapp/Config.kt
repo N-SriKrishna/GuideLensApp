@@ -144,5 +144,5 @@ object Config {
 
     // ===== API Keys =====
     // WARNING: In a real production app, use BuildConfig or a secrets manager.
-    const val GEMINI_API_KEY = "AIzaSyD-yTwlxXXi8waT7pCFd3p_3LXj5TZOeUs"
+    const val GEMINI_API_KEY = ""
 }
